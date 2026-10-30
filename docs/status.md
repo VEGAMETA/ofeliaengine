@@ -879,6 +879,11 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-4b-1b, New Clip, renaming and deleting clips** (#470, ADR 0124's as-built): New
+    Clip makes an `.anim` in the dock's folder for the selected entity (an `Animator` added
+    when missing), one undo step; the header's name field renames a clip, ✕ takes it away.
+    **Team decision (2026-10-30):** K keys the fields the clip moves (an empty clip:
+    position, rotation, scale), ◆ keys one field, editing a moved field keys it.
   - **E12-4b-1a, clips made in the editor in the Animation tab** (#469, ADR 0124's
     as-built): an entity's own clips listed, played and scrubbed in the tab, its tracks
     shown with their keys, its events and Once edited in its `.anim`; the player previews
@@ -1163,9 +1168,9 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    the rest of E12-4 (4b-1b New Clip, renaming and deleting clips; 4b-2 K, ◆ and keys
-    made by editing an animated field; 4c the dope sheet's editing; 4d curves; 4e joints
-    in `.anim`) and E12-5 (graphs).
+    the rest of E12-4 (4b-2 K, ◆ and keys made by editing an animated field, as the team
+    decided; 4c the dope sheet's editing; 4d curves; 4e joints in `.anim`) and E12-5
+    (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per
@@ -1436,10 +1441,12 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-28 (after E9-1a-2): the technical core about **94 %** done, the editor
-about **63 %** of its fifteen phases (E1 to E8 done but E8's rename, E9 and E10 begun),
-Luau about **70 %** (scripting v1 done; the debugger's stops, DAP and the scripts'
-profiling left), the whole engine about **84 %** (2026-10-22: 94 %, 57 %, 45 % and 80 %;
+Estimate of 2026-10-30 (after E12-4b-1): the technical core about **94 %** done, the editor
+about **80 %** of its fifteen phases (E1 to E11 done but E8's rename; E12, animation, about
+60 %: characters, clips, events, the timeline and `.anim` files done, keys, curves and graphs
+left; E13 2D and E14 the rest ahead), Luau about **88 %** (scripting v1, the debugger with
+VS Code and the scripts' profiling done), the whole engine about **90 %** (2026-10-28, after
+E9-1a-2: 94 %, 63 %, 70 % and 84 %; 2026-10-22: 94 %, 57 %, 45 % and 80 %;
 2026-10-20: 93 % and 66 %; 2026-10-17: 92 % and 61 %; 2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
 foliage, HLOD and impostors, VST3 hosting) is not counted.
 

@@ -584,6 +584,33 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4b-1b, 2026-10-30): New Clip, renaming and deleting clips
+
+- **New Clip** (`animation.new_clip`, the tab's button for a selected entity without a
+  rig): an `.anim` (the defaults: a second at 30 frames a second, no tracks) in the dock's
+  folder, named `<entity> <clip>.anim` with a number after it when taken (as New
+  Material's), written and scanned at once (`write_own_file`).
+  - It goes among the entity's animator's clips as `clip` (`clip 2`…), the animator playing
+    it, an `Animator` added when it has none, as one undo step ("New Clip"); undone, the
+    file stays.
+  - The tab opens on it, its name field focused (`clip_autofocus`, cleared once drawn).
+- **Renaming:** the header's name field for a clip made in the editor; Enter renames its
+  key among the animator's clips and the animator's `clip` where it was that one ("Rename
+  Clip"). The file keeps its name; a name taken is refused with a message.
+- **Deleting:** ✕ or `animation.delete_clip` takes the chosen clip from the animator (its
+  `clip` moves to its first other one), one step ("Delete Clip"); the file stays.
+- **Team decision (2026-10-30, the owner's «а»):** K keys the fields the shown clip
+  already moves at the playhead; a clip without tracks gets keys on the entity's position,
+  rotation and scale (Blender's default set). ◆ beside an inspector field keys that field
+  alone, and editing a field the clip moves keys it at the playhead (auto-key; no record
+  mode, question 8a). Taken: K's other ways (only the fields changed since the last key,
+  as Unity's Shift+K; a list of fields to tick) cost more steps for the common case.
+- **Tests:** New Clip on the box without an animator writes `props/Box clip.anim` (an
+  `Anim` asset at once), gives it an animator playing `clip`, undone (no animator, the
+  file kept) and redone; renamed `open`; a second New Clip makes `Box clip 2.anim` and is
+  chosen; deleted, the animator keeps `open` and plays it; undone, both again; the steps
+  named "New Clip", "Rename Clip", "New Clip".
+
 ## As built (E12-4b-1a, 2026-10-30): clips made in the editor in the Animation tab
 
 - **The preview** (`Player::preview_anim(Some((entity, file, time)))`, asked each frame by

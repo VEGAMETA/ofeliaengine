@@ -711,6 +711,10 @@ pub struct AnimationView<'a> {
     pub own: bool,
     /// Its tracks: a row each under the events, its keys marked along it.
     pub tracks: &'a [TrackRow<'a>],
+    /// New Clip offered (E12-4b-1b): an entity selected that has no rig.
+    pub new_clip: bool,
+    /// The clip's name typed as soon as it shows (a clip just made).
+    pub clip_autofocus: bool,
 }
 
 /// A track of a clip made in the editor, as the Animation tab shows it (ADR 0124's E12-4b):
@@ -1275,6 +1279,12 @@ pub struct ShellResponse {
     pub anim_event_delete: bool,
     /// Mark Foot Plants was clicked (E12-3d).
     pub anim_mark_plants: bool,
+    /// New Clip was clicked (E12-4b-1b).
+    pub anim_new_clip: bool,
+    /// The chosen clip made in the editor's ✕ was clicked.
+    pub anim_delete_clip: bool,
+    /// The clip's name field was left: typed in (true) or cancelled.
+    pub anim_clip_name: Option<bool>,
     /// One of the clip's settings was clicked (E12-3e): 0 once, 1 across, 2 up, 3 turn.
     pub anim_clip_setting: Option<u8>,
     /// Their bar was pressed, dragged along or let go.
@@ -5848,7 +5858,30 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 }
                 text(ui, "subject", view.subject, SMALL, p.text_dim);
                 text(ui, "dot", "\u{b7}", SMALL, p.text_dim);
-                text(ui, "clip", view.clip, SMALL, p.text);
+                // A clip made in the editor: its name typed in place, ✕ takes it away.
+                if view.own {
+                    let style = Style {
+                        size: [Size::Fixed(130.0), Size::Fixed(20.0)],
+                        padding: [5.0, 0.0, 5.0, 0.0],
+                        radius: 3.0,
+                        background: Some(p.field),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let look = field_look(p, style, "name", view.clip_autofocus);
+                    let r = ui.text_field("clip_name", view.clip, &look);
+                    if r.committed || r.cancelled {
+                        out.anim_clip_name = Some(r.committed);
+                    }
+                    if panel_button(ui, "delete_clip", icons::CLOSE, false, p) {
+                        out.anim_delete_clip = true;
+                    }
+                } else {
+                    text(ui, "clip", view.clip, SMALL, p.text);
+                }
+                if view.new_clip && label_button(ui, "new_clip", "New Clip", false, p.accent, p) {
+                    out.anim_new_clip = true;
+                }
                 if panel_button(ui, "next", icons::NEXT, false, p) {
                     out.anim_clip_step = Some(1);
                 }
