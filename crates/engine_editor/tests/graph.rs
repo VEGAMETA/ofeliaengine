@@ -1307,8 +1307,20 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     assert!(!game.graph_bar().contains("Fox:"), "{}", game.graph_bar());
     assert!(game.graph_now().is_empty());
     assert!(game.graph_params().is_empty());
-    // Its graph starts again, not from where Play left it (its state is the player's).
+    // Its graph starts again, not from where Play left it (its state is the player's). It
+    // may come a few frames later under a gate's load (the fox made again by a late reload
+    // of the files the test copied): waited for, ten seconds at most.
+    let (started, mut waited) = (Instant::now(), 0);
+    while player.graph_now(fox).is_none() {
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "the fox's graph does not start again"
+        );
+        frame(&mut player, &mut game, &mut overlay);
+        waited += 1;
+    }
     let again = player.graph_now(fox).unwrap();
+    println!("started again after {waited} more frames");
     println!("stopped: {again:?}");
     assert!(again.seconds < 0.05, "started again: {again:?}");
     overlay.destroy(&mut player).unwrap();
