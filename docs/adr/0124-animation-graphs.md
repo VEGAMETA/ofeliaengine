@@ -584,6 +584,106 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5e-1, 2026-10-30): the graph's tab live with the player
+
+- **The tab plays as it holds the graph:** an `.agraph` tab gives the player its graph each
+  time it changes (an edit, an undo, an unsaved text the session brings back), which plays
+  it in place of the file (`Assets::set_anim_graph`); closing the tab gives the file back.
+  As Unity's Animator window does in Play mode (Godot's game runs in another process and
+  plays what was saved), and as the mixer's edits do in Play (E11-1b-3).
+- **Only what plays counts:** the player compares the copy's runtime description
+  (`GraphDesc`, now `PartialEq`) with the one it plays. A copy that changes only what the
+  canvas shows (a state moved, the Any State box) changes nothing, nor does a tab opened
+  on the file as read. A file read back as the copy it replaces keeps its cooks. A file
+  saved while its tab holds it changes nothing either: the copy plays. A real change cooks
+  the graph anew, and each character goes on in the state it was in, by name, from that
+  state's start (E12-5c-2's `resume_in`); a renamed or deleted state starts it at its
+  machine's entry.
+- **Where a machine is** (`AnimGraph::machine_now`, `Player::graph_now`, allocation-free):
+  the state it is in, the one it cross-fades from and how far (or that it inertializes),
+  how far the state's pose has played (a blend's length its clips' weighed together, a
+  nested machine's state's pose). `machine_layer` gives the first layer that plays a
+  machine, the one the canvas shows.
+- **In Play**, the shown graph's tab watches one character playing it: the selected one
+  where it does, else the one watched before, else the first found. Its state is ringed in
+  Play's colour with a line under its title for how far it has played, the state it fades
+  from ringed fainter as the fade goes on, and the arrow it fades through drawn in Play's
+  colour with a dot for how far. The bar says it: `Fox: Walk · 0.17 s · from Idle 34 %`.
+- **The inspector's Graph row:** in Play, the active character's graph in the same words
+  (`Walk · 0.71 s`), in a section after its components.
+- **Stop starts the graphs again** (a fix to E12-5c-1): a graph's state is the player's,
+  not the world's, so the world put back at Stop left every character where Play had (and
+  the next Play went on from there). A run's end (`Player::end_run`) now lets them go; the
+  next frame makes each anew from its animator as the world was put back.
+- **Not yet (E12-5e-2):** the parameters' live values in the inspector (a typed value held
+  for testing), View: Animation States labelling every character in the viewport, the
+  layers above the first.
+- **Tests:**
+  - `engine_anim`: a machine's state, fade and place through Idle, a fade into a blend, the
+    fade over, a jump taken at once; a layer it has not;
+  - on the Radeon, the Fox: where its machine is; a copy that only moves a state, then the
+    file given back, keep it going in its clip (it would start the clip again without the
+    comparison);
+  - the editor on the Radeon: a tab whose unsaved text starts `speed` at 1 makes the fox
+    walk in Play though its file keeps it idle; the bar names the fox's state and the fade;
+    the Graph row says it for the selected fox; both go when Play stops, and the fox's
+    graph starts again (it went on from 0.75 s before the fix); the editor's frame still
+    allocates nothing.
+
+## As built (E12-5c-2, 2026-10-30): a graph's root motion, events and saves
+
+- **Root motion** (`Animator.root_motion` `Move` or `Report`, as a clip's, E12-2c):
+  - the graph cooked for a rig is told its root (the skin's topmost joint), what of the
+    motion each clip gives (its `.meta`'s axes) and each clip's root at its start, read
+    once there (`AnimGraph::set_root_motion`, `engine_anim::root_motion_start`);
+  - a character its game moves sets its `GraphState` in place: every clip a frame or an
+    inertialization's capture samples has its root's ground motion taken out before the
+    blends and layers (`remove_root_motion_since`), as a clip animator's pose has;
+  - each tick, `AnimGraph::played` lists the clips a layer played over the tick's step:
+    each one's weight at the tick's end and the span of it the step covered, in the clip's
+    own seconds (from where the step began, `phase_stepped_from`, to its phase; a clip
+    played once held within its length). The base layer's clips' motions over their spans,
+    each along its clip's axes, are summed by weight (`graph_motion`) and move the
+    character or are reported, as a clip's: a walk blended into a run moves as their
+    weights say, and a cross-fade by both states' clips;
+  - only the base layer moves the character. The layers above pose the body it moves (an
+    arm masked, a lean added); one above that overrides the whole body has its motion
+    taken out in place and moves nothing (left until a game needs it).
+- **Events:** in each layer that shows (`AnimGraph::layer_weight`: its weight, or its
+  weight parameter's value, above 0), the clip weighing most at the tick's end fires the
+  events its step crossed, as a clip animator's (sounds too). A walk blended into a run
+  fires one set of steps, never two; through a cross-fade the heavier state's clip fires.
+  The same clip in two layers fires in each.
+- **A tick the network plays again** ticks no graph (its state is the player's, not rolled
+  back). The character moves by its last tick's motion again, the nearest it has (a steady
+  walk lands where it did; a start or a stop is put right by the next snapshot), and its
+  clips fire nothing again.
+- **Saves and scenes:** `state` (the first layer's state by name), `params` and
+  `params_set` are the animator's fields, so a save keeps them. A character whose animator
+  names a state when its graph starts playing goes on in that state, from its start and
+  with no blend (`AnimGraph::resume_in`); a name the graph has not leaves it at its entry.
+  So does a character whose graph is played anew (its file or model read again, the
+  editor's copy edited): it stays in the state it was in instead of going back to the
+  entry. `state` is written by ticks only, so a scene saved while the editor edits keeps
+  none and its characters start at the entry.
+- **Not kept:** where in its state a character was (a save made halfway through a jump
+  jumps from its start), a blend under way, the layers above's machines.
+- **Measured** (`graph_bench --in-place`, best of three alternating runs, ref-1, release):
+  posing in place costs 0.07–0.1 µs a character a frame (4.35 → 4.42–4.46 µs at 1,000
+  characters on one thread, +2 %; 16 workers 0.78 → 0.78–0.80 ms); reading each clip's
+  start at every sample, as the first build did, cost +6 %. Ticks unchanged. 0 allocations
+  in 608 frames of `zero_alloc_skins` with its graph character moved by its root motion and
+  firing its steps.
+- **Tests:**
+  - `engine_anim`: a tick's spans (15/64 to 16/64 of a second-long walk), the root kept on
+    its spot in place, the layers' weights (a parameter's held to 0 to 1, a layer it has
+    not 0), a machine put into a state by its name (a name or a layer it has not changes
+    nothing);
+  - on the Radeon: the generated walker's graph crosses 1.25 m in 80 ticks exactly as the
+    clip's walker does, its hips on the spot every frame; a fox saved in Alert goes on in
+    Alert; CesiumMan's dancer moved by its graph's root motion (his walk crosses little)
+    with its steps fired in each of its three layers.
+
 ## As built (E12-5d-1, 2026-10-30): the graph's canvas in the editor
 
 - **One tab kind for both graphs:** `engine_editor::graph::GraphDoc` holds an `.agraph` too (`anim`: `engine_editor::agraph::AnimDoc`, the material `graph` empty), so its tab, Ctrl+S and Ctrl+W, Ctrl+Tab, the one history's file steps (`History::change_file`), its autosave (`.ofelia/autosave/<name>-<hash>.agraph`) and the session are the material graph's; a step of a closed graph undone opens it again. The canvas's view, pointer, back and grid, box selection and boxes' look are the material graph's (`graph::draw_back`, `draw_select_box`).
@@ -676,8 +776,8 @@ allocation with transitions and events every tick; the same events at the same t
   `Player::model_joints` take the same pose (sockets at the tick's moment).
 - **A graph that cannot be read** shows the rest pose (and is told once in the log).
 - **Not yet:** a graph's root motion stays in its pose and its clips fire no events (5c-2,
-  with saves of its state); its clips are the model's, not the animator's own `.anim`
-  clips; inertialized transitions cross-fade (5b-2, in parallel).
+  with saves of its state, since built); its clips are the model's, not the animator's own
+  `.anim` clips; inertialized transitions cross-fade (5b-2, since built).
 - **Measured:** 0 allocations in 607 frames of CesiumMan's `zero_alloc_skins` with a fourth
   character playing a graph (two states cross-faded by a number set every 120 frames, a
   trigger from any state every 90, a layer masked to an arm, an additive one), next to the

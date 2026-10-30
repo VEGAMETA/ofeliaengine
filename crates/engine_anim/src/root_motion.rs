@@ -219,18 +219,58 @@ pub fn remove_root_motion(
     root: usize,
     mode: RootMotionMode,
 ) {
+    if let Some(start) = root_motion_start(clip, skeleton.rest(), root, mode) {
+        remove_root_motion_since(pose, root, mode, start);
+    }
+}
+
+/// The parts of a clip's root joint at its start that root motion takes out
+/// ([`root_motion_start`]): what [`remove_root_motion_since`] resets the root's parts to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootStart {
+    /// The extracted translation at the start.
+    pub translation: Vec3,
+    /// The extracted turn at the start.
+    pub rotation: Quat,
+}
+
+/// Clip `clip`'s root joint `root` at its start (time 0), the parts of it `mode` extracts;
+/// `rest` is the skeleton's rest pose. Read once per clip where poses take the motion out
+/// often (an animation graph keeps one per clip it plays, ADR 0124's E12-5c-2). None for a
+/// root the rest pose has not.
+pub fn root_motion_start(
+    clip: &CompressedClip,
+    rest: &Pose,
+    root: usize,
+    mode: RootMotionMode,
+) -> Option<RootStart> {
+    if root >= rest.len() {
+        return None;
+    }
+    let (translation, rotation) = extracted(&clip.sample_joint(root, 0.0, rest.get(root)), mode);
+    Some(RootStart {
+        translation,
+        rotation,
+    })
+}
+
+/// [`remove_root_motion`] with the clip's start read before ([`root_motion_start`]).
+pub fn remove_root_motion_since(
+    pose: &mut Pose,
+    root: usize,
+    mode: RootMotionMode,
+    start: RootStart,
+) {
     if root >= pose.len() {
         return;
     }
-    let start = clip.sample_joint(root, 0.0, skeleton.rest().get(root));
     let mut t = pose.get(root);
     let (now_t, now_r) = extracted(&t, mode);
-    let (start_t, start_r) = extracted(&start, mode);
     // Undo the yaw since the start, then the translation since the start, in the space
     // the start's yaw defines.
-    let undo = (start_r * now_r.conjugate()).normalize();
+    let undo = (start.rotation * now_r.conjugate()).normalize();
     t.rotation = (undo * t.rotation).normalize();
     let p = Vec3::from(t.translation) - now_t;
-    t.translation = Vec3A::from(undo * p + start_t);
+    t.translation = Vec3A::from(undo * p + start.translation);
     pose.set(root, t);
 }

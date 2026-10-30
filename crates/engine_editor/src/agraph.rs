@@ -31,7 +31,7 @@ use crate::graph::{
     RADIUS, ROW, SELECTED, TITLE, TITLE_TEXT,
 };
 use crate::paint::UiText;
-use engine_anim::{Condition, ConditionError};
+use engine_anim::{Condition, ConditionError, MachineNow};
 use engine_core::math::{Vec2, Vec4};
 use engine_render2d::{Canvas, Order, Quad};
 use engine_scene::{
@@ -383,6 +383,56 @@ pub(crate) enum AnimSection {
     Add,
 }
 
+/// The watched character's machine in Play (ADR 0124's E12-5e), as of the editor's last
+/// frame: the canvas lights its state and the one it fades from. Off while nothing plays the
+/// graph; its texts keep their room.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Live {
+    pub(crate) on: bool,
+    /// The watched character's name.
+    pub(crate) who: String,
+    /// The state it is in, and the one it fades from (empty: none), by name.
+    pub(crate) state: String,
+    pub(crate) from: String,
+    /// How far into the transition under way, 0 to 1 (1 with none), and how far the
+    /// state's pose has played, 0 to 1.
+    pub(crate) faded: f32,
+    pub(crate) progress: f32,
+    /// What it does, in a line ([`write_now`]).
+    pub(crate) line: String,
+}
+
+impl Live {
+    /// Watching `who`, whose machine is as `now` says.
+    pub(crate) fn set(&mut self, who: &str, now: &MachineNow<'_>) {
+        self.on = true;
+        self.who.clear();
+        self.who.push_str(who);
+        self.state.clear();
+        self.state.push_str(now.state);
+        self.from.clear();
+        if let Some(from) = now.from {
+            self.from.push_str(from);
+        }
+        self.faded = now.faded;
+        self.progress = now.progress;
+        write_now(&mut self.line, now);
+    }
+}
+
+/// What a running machine does, in a line (ADR 0124's E12-5e): `Run · 0.42 s`, then
+/// `· from Walk 30 %` through a cross-fade, `· inertializing 30 %` through an
+/// inertialization.
+pub(crate) fn write_now(out: &mut String, now: &MachineNow<'_>) {
+    out.clear();
+    let _ = write!(out, "{} \u{b7} {:.2} s", now.state, now.seconds);
+    if let Some(from) = now.from {
+        let _ = write!(out, " \u{b7} from {from} {:.0} %", now.faded * 100.0);
+    } else if now.inertial && now.faded < 1.0 {
+        let _ = write!(out, " \u{b7} inertializing {:.0} %", now.faded * 100.0);
+    }
+}
+
 /// An animation graph's file as its tab holds it, and what its canvas shows.
 #[derive(Debug)]
 pub(crate) struct AnimDoc {
@@ -404,6 +454,11 @@ pub(crate) struct AnimDoc {
     pub(crate) hover: Hit,
     /// The revision its boxes were laid out at.
     laid_out: Option<u64>,
+    /// The revision last given to the player, which plays it in place of the file (ADR
+    /// 0124's E12-5e).
+    pub(crate) given: Option<u64>,
+    /// In Play, the watched character's machine.
+    pub(crate) live: Live,
 }
 
 impl AnimDoc {
@@ -420,6 +475,8 @@ impl AnimDoc {
             marks: Vec::new(),
             hover: Hit::Canvas,
             laid_out: None,
+            given: None,
+            live: Live::default(),
         };
         doc.refresh();
         doc
@@ -1166,6 +1223,9 @@ impl AnimDoc {
                 }
             }
             out.push_str(&first.why);
+        }
+        if self.live.on {
+            let _ = write!(out, " \u{b7} {}: {}", self.live.who, self.live.line);
         }
     }
 }
@@ -2376,6 +2436,26 @@ pub(crate) fn draw(
                 .order(order),
         );
     };
+    // In Play (ADR 0124's E12-5e), the transition the watched character fades through: the
+    // arrow from the state it fades from, else from Any State, into the state it is in.
+    let live = &anim.live;
+    let playing = Vec4::from_array(p.playing);
+    let live_arrow = if live.on && !live.from.is_empty() {
+        let into = |a: &Arrow, from: Option<&str>| {
+            anim.file.transitions.get(&a.id).is_some_and(|t| {
+                state_name(&anim.file, &t.to) == live.state
+                    && match from {
+                        Some(from) => !t.from.is_empty() && state_name(&anim.file, &t.from) == from,
+                        None => t.from.is_empty(),
+                    }
+            })
+        };
+        let from = Some(live.from.as_str());
+        (anim.arrows.iter().position(|a| into(a, from)))
+            .or_else(|| anim.arrows.iter().position(|a| into(a, None)))
+    } else {
+        None
+    };
     // The transitions, under the boxes: red with why where they do not hold together, the
     // selected orange, those of the selected states and under the pointer brighter.
     for (k, a) in anim.arrows.iter().enumerate() {
@@ -2386,14 +2466,28 @@ pub(crate) fn draw(
             t.is_some_and(|t| anim.selected.contains(&t.to) || anim.selected.contains(&t.from));
         let why = anim.transition_mark(&a.id);
         let lit = selected || hovered || touched;
+        let lived = live_arrow == Some(k);
         let color = if why.is_some() {
             error
         } else if selected {
             SELECTED
+        } else if lived {
+            playing
         } else {
             Vec4::new(1.0, 1.0, 1.0, if lit { 0.9 } else { 0.55 })
         };
-        let width = if lit { 2.5 } else { 1.75 } * look.scale;
+        let width = if lit || lived { 2.5 } else { 1.75 } * look.scale;
+        // How far the fade is: a dot along the arrow.
+        if lived && !a.looped {
+            let (from, to_) = (to(a.from), to(a.to));
+            let dot = from + (to_ - from) * live.faded.clamp(0.0, 1.0);
+            let d = 4.0 * look.scale;
+            canvas.draw(
+                &Quad::rounded_rect(dot, Vec2::splat(d * 2.0), d)
+                    .color(playing)
+                    .order(order),
+            );
+        }
         if a.looped {
             let [q0, q1, q2, q3] = a.loop_points().map(to);
             for (u, v) in [(q0, q1), (q1, q2)] {
@@ -2545,6 +2639,38 @@ pub(crate) fn draw(
                     .color(color)
                     .order(order),
             );
+        }
+        // In Play (ADR 0124's E12-5e): the watched character's state ringed in Play's
+        // colour, a line under its title for how far its pose has played; the state it
+        // fades from ringed fainter as the fade goes on.
+        if live.on {
+            let now = b.title == live.state;
+            let alpha = if now {
+                1.0
+            } else if !live.from.is_empty() && b.title == live.from {
+                (1.0 - live.faded).max(0.25)
+            } else {
+                0.0
+            };
+            if alpha > 0.0 {
+                let grow = Vec2::splat(4.0 * look.scale);
+                canvas.draw(
+                    &Quad::rounded_rect((lo + hi) * 0.5, size + grow, radius + grow.x * 0.5)
+                        .outline(2.0 * look.scale)
+                        .color(playing.with_w(playing.w * alpha))
+                        .order(order),
+                );
+            }
+            let played = (hi.x - lo.x) * live.progress.clamp(0.0, 1.0);
+            if now && played >= 0.5 {
+                let y = lo.y + TITLE * z;
+                solid(
+                    canvas,
+                    Vec2::new(lo.x, y - 3.0 * look.scale),
+                    Vec2::new(lo.x + played, y),
+                    playing,
+                );
+            }
         }
         // Selected with a problem: its orange inside the red.
         if why.is_some() && anim.selected.contains(&b.id) {

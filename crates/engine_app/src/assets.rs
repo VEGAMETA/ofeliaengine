@@ -1028,6 +1028,29 @@ fn tick_motion(
     Some(rig.mesh_motion(motion))
 }
 
+/// The root motion an animation graph's last tick played (ADR 0124's E12-5c-2), in its rig's
+/// mesh space as [`tick_motion`]'s: its base layer's clips' motions over the tick's step,
+/// each along its clip's own axes and by its weight at the tick's end (a clip the rig has
+/// not moves nothing). None while the layer plays nothing.
+fn graph_motion(
+    rig: &crate::skins::Rig,
+    table: &ModelEvents,
+    play: &crate::graphs::GraphPlay,
+) -> Option<(Vec3, f32)> {
+    let (mut moved, mut turned, mut any) = (Vec3::ZERO, 0.0f32, false);
+    for p in play.cooked.graph.played(&play.state, 0) {
+        let k = usize::from(p.clip);
+        let Some(motion) = rig.clip_motion(k, p.from, p.to, clip_play(rig, table, k).axes) else {
+            continue;
+        };
+        let (m, t) = rig.mesh_motion(motion);
+        moved += m * p.weight;
+        turned += t * p.weight;
+        any = true;
+    }
+    any.then_some((moved, turned))
+}
+
 /// The clip whose events an [`Animator`]'s last tick fires (ADR 0124's E12-3b), and the span
 /// of it the tick played: its clip, but through a cross-fade the clip fading out while that
 /// one still weighs more, so a fade never doubles a footstep. None for a rig without clips.
@@ -1116,7 +1139,8 @@ fn sync_graph(
             once: clip_play(rig, table, k).once,
         })
     };
-    let Some(cooked) = graphs.cook(graph.file, rig, owned.file, clip) else {
+    let motion = |k: u16| rig.motion_mode_of(clip_play(rig, table, usize::from(k)).axes);
+    let Some(cooked) = graphs.cook(graph.file, rig, owned.file, clip, motion) else {
         if owned.graph.take().is_some() {
             owned.posed = false;
         }
@@ -1129,6 +1153,12 @@ fn sync_graph(
         _ => {
             let mut state = engine_anim::GraphState::new(&cooked.graph);
             set_params(&mut state, animator, &cooked.graph);
+            state.set_in_place(animator.root_motion != RootMotion::InPose);
+            // In the state a loaded save names, or the one it was in when its graph is
+            // played anew (E12-5c-2); else at the entry.
+            if !animator.state.is_empty() {
+                cooked.graph.resume_in(&mut state, 0, &animator.state);
+            }
             cooked.graph.tick(&mut state, 0.0);
             owned.graph = Some(crate::graphs::GraphPlay {
                 file: graph.file,
@@ -3089,9 +3119,16 @@ impl Assets {
                 continue;
             };
             let mode = animator.root_motion;
-            // An animation graph's root motion stays in its pose for now (E12-5c).
-            let motion = if owned.held || mode == RootMotion::InPose || animator.plays_graph() {
+            let motion = if owned.held || mode == RootMotion::InPose {
                 None
+            } else if animator.plays_graph() {
+                // An animation graph's (E12-5c-2): its base layer's clips' motions. A tick
+                // the network plays again does not tick the graph, so it moves the character
+                // by its last tick's motion again (as each tick it plays again had).
+                owned
+                    .graph
+                    .as_ref()
+                    .and_then(|play| graph_motion(&owned.rig, &owned.events, play))
             } else {
                 tick_motion(&owned.rig, animator, &owned.events)
             };
@@ -3149,13 +3186,50 @@ impl Assets {
         if !self.event_characters.is_empty() || !self.fields.fired.is_empty() {
             engine_profiler::zone!("app::Assets::fire_events");
             let mut sounds = core::mem::take(&mut self.event_sounds);
+            let again = engine_net::Resimulating::now(world);
             for (e, rig, events) in &self.event_characters {
                 let e = *e;
                 let Some(animator) = world.get::<Animator>(e) else {
                     continue;
                 };
-                // An animation graph's clips fire nothing for now (E12-5c).
+                // An animation graph's (E12-5c-2): in each layer, the clip that weighs most
+                // fires its events over the tick's step. A tick the network plays again
+                // does not tick a graph (its state is the player's), so it fires nothing.
                 if animator.plays_graph() {
+                    if again {
+                        continue;
+                    }
+                    let Some(play) = self.owned.get(&e).and_then(|o| o.graph.as_ref()) else {
+                        continue;
+                    };
+                    let graph = &play.cooked.graph;
+                    for l in 0..graph.layer_count() {
+                        // A layer that shows nothing fires nothing.
+                        if graph.layer_weight(&play.state, l) <= 1e-4 {
+                            continue;
+                        }
+                        let heaviest = graph
+                            .played(&play.state, l)
+                            .max_by(|a, b| a.weight.total_cmp(&b.weight));
+                        let Some(p) = heaviest else {
+                            continue;
+                        };
+                        let k = usize::from(p.clip);
+                        let Some(clip) = rig.clips().get(k) else {
+                            continue;
+                        };
+                        let events = events.of_clip(clip.name(), k);
+                        crossed(events, clip.duration(), p.from, p.to, |event| {
+                            fired.push(AnimationEvent {
+                                entity: e,
+                                name: Arc::clone(&event.name),
+                                data: Arc::clone(&event.data),
+                            });
+                            if let Some(sound) = &event.sound {
+                                sounds.push((e, Arc::clone(sound)));
+                            }
+                        });
+                    }
                     continue;
                 }
                 let Some((k, from, to)) = played_span(rig, animator) else {
@@ -3185,7 +3259,6 @@ impl Assets {
                     sounds.push((*e, Arc::clone(sound)));
                 }
             }
-            let again = engine_net::Resimulating::now(world);
             for (e, sound) in sounds.drain(..) {
                 if again {
                     continue;
@@ -3325,6 +3398,9 @@ impl Assets {
             };
             let graph = &play.cooked.graph;
             set_params(&mut play.state, animator, graph);
+            // Root motion out of its pose where the game moves it by it (E12-5c-2).
+            play.state
+                .set_in_place(animator.root_motion != RootMotion::InPose);
             let step = if animator.paused {
                 0.0
             } else {
@@ -3663,6 +3739,28 @@ impl Assets {
     /// The rig of entity `e`'s skinned model (ADR 0124's E12-1a), once its skin is made.
     pub(crate) fn model_rig(&self, e: Entity) -> Option<&crate::skins::Rig> {
         self.owned.get(&e).map(|o| &*o.rig)
+    }
+
+    /// Every character's animation graph let go, to be made anew from its animator on the
+    /// next frame or tick (ADR 0124's E12-5e): after a run ends and its world is put back
+    /// (the editor's Stop), the characters start their graphs again as their animators now
+    /// say, not from where the run left them.
+    pub(crate) fn restart_graphs(&mut self) {
+        for owned in self.owned.values_mut() {
+            if owned.graph.take().is_some() {
+                owned.posed = false;
+            }
+        }
+    }
+
+    /// Where entity `e`'s animation graph's first layer that plays a machine is now (ADR
+    /// 0124's E12-5e): its state, the one it fades from and how far, how far the state's
+    /// pose has played. None for a character playing no graph (or not one its rig could
+    /// cook), or a graph without a machine.
+    pub(crate) fn graph_now(&self, e: Entity) -> Option<engine_anim::MachineNow<'_>> {
+        let play = self.owned.get(&e)?.graph.as_ref()?;
+        let graph = &play.cooked.graph;
+        graph.machine_now(&play.state, graph.machine_layer()?)
     }
 
     /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c), in

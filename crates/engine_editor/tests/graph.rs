@@ -1073,3 +1073,181 @@ fn an_animation_graphs_tab_draws_its_states_and_transitions() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124 E12-5e: an animation graph's tab plays as it holds it: its unsaved text (back
+/// from the session's autosave) starts `speed` at 1, so in Play the fox walks though its
+/// file keeps it idle. The tab's bar names the fox's state with how far it played and the
+/// fade from Idle; the inspector's Graph row says it for the selected fox; both go when Play
+/// stops.
+#[test]
+fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
+    use engine_app::{AssetMeta, Assets, Model};
+    use engine_ecs::Transform;
+    use engine_runtime::Animator;
+    use engine_scene::{
+        AssetRef, Name, SaveOptions, SceneId, SceneRegistry, find_named, save_with,
+    };
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/Fox");
+    if !source.join("Fox.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("ofelia-editor-agraph-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["models", "anim", ".ofelia/autosave"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    for file in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/Fox.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "fox1"),
+        AssetRef::part(id, "fox_material"),
+    );
+    // Idle (Survey) to Walk once `speed` passes 0.1, a half-second fade.
+    let graph_id = AssetId::new();
+    let graph = |speed: &str| {
+        format!(
+            "[agraph version=1 id={graph_id}]\n\n\
+             params[\"speed\"].kind = Float\nparams[\"speed\"].value = {speed}\n\
+             layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+             nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
+             nodes[\"m\"].at = [-220, -120]\n\
+             nodes[\"cs\"].clip = \"Survey\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+             states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
+             states[\"idle\"].pose = \"cs\"\n\
+             states[\"walk\"].at = [320, 0]\nstates[\"walk\"].machine = \"m\"\n\
+             states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
+             transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
+             transitions[\"t1\"].when = \"speed > 0.1\"\ntransitions[\"t1\"].blend = 0.5\n"
+        )
+    };
+    std::fs::write(dir.join("anim/fox.agraph"), graph("0")).unwrap();
+    std::fs::write(dir.join(".ofelia/autosave/fox-live.agraph"), graph("1")).unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \"anim/fox.agraph\"\n\
+         autosave = \"autosave/fox-live.agraph\"\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Fox"),
+        Transform::from_xyz(0.0, -1.0, -4.0).with_scale(engine_core::math::Vec3::splat(0.02)),
+        Model::new(mesh, material),
+        Animator {
+            graph: AssetRef::file(graph_id),
+            ..Animator::default()
+        },
+    ));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(mesh, "models/Fox.gltf#fox1");
+    paths.insert(material, "models/Fox.gltf#fox_material");
+    paths.insert(AssetRef::file(graph_id), "anim/fox.agraph");
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor animation graph live test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    let frame =
+        |player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay| {
+            game.sync_assets(player);
+            player.frame_overlaid(game, Some(&mut *overlay)).unwrap();
+        };
+    let fox = find_named(player.world_mut(), "Fox").unwrap();
+    let started = Instant::now();
+    while player.model_rig(fox).is_none() {
+        assert!(
+            started.elapsed().as_secs() < 60,
+            "the fox's skin is not made"
+        );
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let bar = game.graph_bar();
+    println!("editing: {bar}");
+    assert!(bar.starts_with("2 states"), "the tab is shown: {bar}");
+    assert!(
+        !bar.contains("Fox:"),
+        "nothing watched while editing: {bar}"
+    );
+    // Play: the tab's copy plays (the file would keep the fox idle).
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..12 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.playing());
+    let bar = game.graph_bar();
+    println!("in Play: {bar}");
+    assert!(bar.contains("Fox: Walk \u{b7} "), "{bar}");
+    assert!(bar.contains("from Idle"), "fading in: {bar}");
+    assert_eq!(
+        player.world_mut().get::<Animator>(fox).unwrap().state,
+        "Walk"
+    );
+    // The selected fox: the inspector's Graph row.
+    game.select(Some(fox));
+    for _ in 0..40 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let now = game.graph_now();
+    println!("the Graph row: {now}");
+    assert!(now.starts_with("Walk \u{b7} "), "{now}");
+    assert!(!now.contains("from"), "the fade is over: {now}");
+    // Stopped: nothing watched, nothing said.
+    game.stop_playing(&mut player);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.playing());
+    assert!(!game.graph_bar().contains("Fox:"), "{}", game.graph_bar());
+    assert!(game.graph_now().is_empty());
+    // Its graph starts again, not from where Play left it (its state is the player's).
+    let again = player.graph_now(fox).unwrap();
+    println!("stopped: {again:?}");
+    assert!(again.seconds < 0.05, "started again: {again:?}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

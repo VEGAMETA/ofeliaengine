@@ -309,8 +309,20 @@ if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(
 - Scripts set them by name: `self.Animator:set("speed", 3.5)` and the rest of "From
   scripts, its graph" above.
 - The graph plays at the animator's `speed`, held while it is `paused`.
-- For now its root motion stays in its pose, its clips fire no events, and a save does not
-  keep where it is (E12-5c-2).
+- **Root motion** (E12-5c-2): with `root_motion` at `Move` or `Report` the graph's clips
+  move the character as a clip does (above), their motions blended by their weights: a
+  walk blended into a run moves as far as the blend says. The base layer moves it; the
+  layers above only pose it (an arm, a lean).
+- **Events:** in each layer that shows (its weight above 0), the clip that weighs most
+  fires its events, so a walk blended into a run fires one set of steps. Scripts hear them
+  in `on_animation_event` as a clip's.
+- **Saves:** a save keeps the state the graph is in (by name) and the parameters the game
+  set. Loaded, the character goes on in that state from its start; where in the state it
+  was and a blend under way are not kept. A graph edited while it plays goes on in the
+  state it was in, too.
+- **Where it is** (E12-5e): `player.graph_now(entity)` tells its first machine's state, the
+  state it fades from and how far, and how far the state has played (the editor shows it
+  in Play on the graph's tab and in the inspector). It allocates nothing.
 
 ```text
 [agraph version=1 id=…]

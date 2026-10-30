@@ -67,7 +67,7 @@ pub use compress::{AdditiveBase, CompressSettings, CompressionStats, compress};
 pub use condition::{Condition, ConditionError, MAX_DEPTH, ParamSlot};
 pub use graph::{
     AnimGraph, ClipInfo, GraphDesc, GraphParamKind, GraphProblem, GraphState, GraphWork, LayerDesc,
-    MAX_LEAVES, MAX_PARAMS, NodeDesc, ParamDesc, StateDesc, TransitionDesc,
+    MAX_LEAVES, MAX_PARAMS, MachineNow, NodeDesc, ParamDesc, Played, StateDesc, TransitionDesc,
 };
 pub use ik::{Fabrik, IkOutcome, LookAt, TwoBoneIk, rotate_joint};
 pub use jobs::for_each_parallel;
@@ -75,7 +75,8 @@ pub use model::{local_to_model, rows, skinning_matrices, update_model_range};
 pub use pose::{Pose, Transform, nlerp, rotation_angle};
 pub use raw::{Interpolation, Keyed, RawClip, RawJointTracks, RawTrack};
 pub use root_motion::{
-    RootMotion, RootMotionMode, remove_root_motion, root_motion, root_motion_over, twist_of, yaw_of,
+    RootMotion, RootMotionMode, RootStart, remove_root_motion, remove_root_motion_since,
+    root_motion, root_motion_over, root_motion_start, twist_of, yaw_of,
 };
 pub use skeleton::{JointDesc, MAX_JOINTS, NO_PARENT, Skeleton, SkeletonError};
 

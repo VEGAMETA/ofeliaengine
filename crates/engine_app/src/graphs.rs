@@ -79,6 +79,9 @@ pub(crate) struct Graphs {
     /// Each graph file read (none: it could not be, told once), or held by the editor.
     files: HashMap<AssetId, Option<Arc<GraphFile>>>,
     held: Vec<AssetId>,
+    /// The editor's copies given back ([`Graphs::hold`] with none), until their files are
+    /// read again: a file read as its copy was keeps its characters going.
+    released: HashMap<AssetId, Arc<GraphFile>>,
     /// Each graph cooked, by its file and its rig's address.
     cooked: HashMap<(AssetId, usize), Arc<Cooked>>,
     /// Moves on whenever a graph file or a cooked graph changes: a character's play made at
@@ -131,9 +134,20 @@ impl Graphs {
                     None
                 }
             };
-            if read.is_some() {
-                self.untold.push(id);
-            }
+            // Where the editor gave its copy back: the same graph keeps its cooks (its
+            // characters go on), another is cooked anew.
+            let read = match (self.released.remove(&id), read) {
+                (Some(copy), Some(file)) if copy.desc == file.desc => Some(copy),
+                (copy, read) => {
+                    if copy.is_some() {
+                        self.cooked.retain(|&(graph, _), _| graph != id);
+                    }
+                    if read.is_some() {
+                        self.untold.push(id);
+                    }
+                    read
+                }
+            };
             self.files.insert(id, read);
         }
         self.files.get(&id)?.as_ref()
@@ -141,23 +155,47 @@ impl Graphs {
 
     /// Graph file `id` as the editor holds it while it edits it, in place of the file until
     /// `None` gives the file back: its characters play it from their next tick, cooked again
-    /// (their states made anew).
+    /// (their states made anew, each in the state it was in, E12-5c-2). A copy that plays as
+    /// what they play (a state moved on the canvas, a tab opened on the file as read) changes
+    /// nothing, nor does a file read back as the copy it replaces (ADR 0124's E12-5e).
     pub(crate) fn hold(&mut self, id: AssetId, file: Option<&AnimGraphFile>) {
         match file {
             Some(file) => {
                 let file = GraphFile::new(file, String::from("the editor's copy"));
-                self.files.insert(id, Some(Arc::new(file)));
                 if !self.held.contains(&id) {
                     self.held.push(id);
                 }
+                let released = self.released.remove(&id);
+                let same = self
+                    .files
+                    .get(&id)
+                    .and_then(Option::as_ref)
+                    .or(released.as_ref())
+                    .is_some_and(|f| f.desc == file.desc);
+                if same {
+                    if let Some(copy) = released {
+                        self.files.insert(id, Some(copy));
+                    }
+                    return;
+                }
+                self.files.insert(id, Some(Arc::new(file)));
                 self.untold.push(id);
+                self.cooked.retain(|&(graph, _), _| graph != id);
             }
             None => {
+                if !self.held.contains(&id) {
+                    return;
+                }
                 self.held.retain(|&h| h != id);
-                self.files.remove(&id);
+                // Kept until the file is read again (its characters look at the next
+                // generation), which keeps the cooks of a file read as the copy was.
+                if let Some(Some(copy)) = self.files.remove(&id) {
+                    self.released.insert(id, copy);
+                } else {
+                    self.cooked.retain(|&(graph, _), _| graph != id);
+                }
             }
         }
-        self.cooked.retain(|&(graph, _), _| graph != id);
         self.generation += 1;
     }
 
@@ -166,25 +204,30 @@ impl Graphs {
     /// or for a rig of a model of it, are cooked again.
     pub(crate) fn forget(&mut self, file: AssetId) {
         let before = (self.files.len(), self.cooked.len());
-        if !self.held.contains(&file) {
+        let held = self.held.contains(&file);
+        if !held {
             self.files.remove(&file);
         }
+        // A held graph's cooks stay: the editor's copy plays, not the file (its save in Play
+        // changes nothing).
         self.cooked
-            .retain(|&(graph, _), c| graph != file && c.model != file);
+            .retain(|&(graph, _), c| (graph != file || held) && c.model != file);
         if (self.files.len(), self.cooked.len()) != before {
             self.generation += 1;
         }
     }
 
     /// Graph file `id` cooked for rig `rig` of model file `model` (once per rig): `clip`
-    /// finds a clip the graph names among the rig's. What cannot be cooked is told once (the
-    /// rest still plays); none for a file not read.
+    /// finds a clip the graph names among the rig's, `motion` gives a clip's (by its index)
+    /// root motion's parts (E12-5c-2). What cannot be cooked is told once (the rest still
+    /// plays); none for a file not read.
     pub(crate) fn cook(
         &mut self,
         id: AssetId,
         rig: &Arc<Rig>,
         model: AssetId,
         clip: impl Fn(&str) -> Option<ClipInfo>,
+        motion: impl Fn(u16) -> engine_anim::RootMotionMode,
     ) -> Option<Arc<Cooked>> {
         let key = (id, Arc::as_ptr(rig) as usize);
         if let Some(cooked) = self.cooked.get(&key) {
@@ -193,10 +236,9 @@ impl Graphs {
         let file = Arc::clone(self.files.get(&id)?.as_ref()?);
         let clips = rig.clips();
         let (mut graph, problems) = AnimGraph::cook(&file.desc, clip, rig.skeleton());
-        graph.prepare(
-            |k| clips.get(usize::from(k)).map(crate::RigClip::compressed),
-            rig.skeleton().rest(),
-        );
+        let compressed = |k: u16| clips.get(usize::from(k)).map(crate::RigClip::compressed);
+        graph.prepare(compressed, rig.skeleton().rest());
+        graph.set_root_motion(rig.motion_root(), motion, compressed, rig.skeleton().rest());
         for p in &problems {
             log::warn!(
                 target: "engine_app",

@@ -14,7 +14,8 @@
 //! animation graph (E12-5c: two states cross-faded by a number set now and then, a trigger
 //! taken from any state, a layer masked to an arm and an additive one; E12-5b-2: the
 //! trigger's transition inertialized, and a fade it cuts short going on as one, their poses
-//! captured after the ticks). Khronos' CesiumMan
+//! captured after the ticks; E12-5c-2: its root motion moving it, its clip's steps fired).
+//! Khronos' CesiumMan
 //! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
@@ -173,6 +174,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         Model::new(mesh, material),
         engine_runtime::Animator {
             graph: AssetRef::file(graph_file),
+            root_motion: engine_runtime::RootMotion::Move,
             ..engine_runtime::Animator::default()
         },
     ));
@@ -259,6 +261,12 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     }
     let mut fast = false;
     let mut states = [0u32; 2];
+    let mut steps = 0usize;
+    let danced_from = player
+        .world_mut()
+        .get::<Transform>(dancer)
+        .unwrap()
+        .translation;
     let mut waving = true;
     let mut frames = 0u32;
     let mut creaks = 0usize;
@@ -291,6 +299,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
             {
                 heard += events.fired().len();
                 creaks += events.fired().iter().filter(|e| e.entity == door).count();
+                steps += events.fired().iter().filter(|e| e.entity == dancer).count();
             }
             frames += 1;
             if frames.is_multiple_of(200) {
@@ -325,6 +334,17 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         "the dancer: {} frames walking, {} fast",
         states[0], states[1]
     );
+    let danced = (player
+        .world_mut()
+        .get::<Transform>(dancer)
+        .unwrap()
+        .translation
+        - danced_from)
+        .length();
+    println!("the dancer: {steps} steps fired, moved {danced:.3} by its root motion");
+    assert!(steps > 0, "its graph's clip fired its steps");
+    // CesiumMan walks nearly in place: a little, as the walker's clip moves it.
+    assert!(danced > 1e-3, "its graph's root motion moved it: {danced}");
     assert!(
         states[0] > 0 && states[1] > 0,
         "both states shown: {states:?}"

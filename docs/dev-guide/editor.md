@@ -1661,9 +1661,19 @@ unless it says otherwise).
   entry.
 - **Every edit is one step** of the editor's one history; unsaved graphs are autosaved and
   the session brings their tabs back, as material graphs'.
+- **The game plays the tab** (E12-5e): every edit reaches the characters playing the graph
+  at once, unsaved, in Play too: each goes on in the state it was in (from its start; one
+  whose state you renamed or deleted starts at the entry). Moving boxes changes nothing for
+  them. Closing the tab gives them the file back.
+- **In Play the canvas shows a character's state:** the selected character when it plays
+  this graph, else one that does. Its state is ringed in Play's colour with a line under its
+  name for how far its clip has played; through a cross-fade, the state it leaves is ringed
+  fainter and the arrow it goes along carries a dot for how far. The bar says it, e.g.
+  `Fox: Walk · 0.17 s · from Idle 34 %`, and the inspector's **Graph** section says the
+  same for the selected character.
 - **Not yet:** machines inside machines (Tab into one), layers and masks, blends drawn as
-  points, the character's preview in the corner, and the live state in Play come with the
-  next steps (ADR 0124's E12-5d and E12-5e).
+  points, the character's preview in the corner, and the parameters' live values in Play
+  come with the next steps (ADR 0124's E12-5d-2 and E12-5e-2).
 
 ## Autosave and the session
 
