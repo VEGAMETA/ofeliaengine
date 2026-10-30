@@ -584,6 +584,37 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3a, 2026-10-30): the Animation tab's timeline
+
+- **The tab** (the bottom bar's fifth, Alt+N, "View: Animation") shows the Clips' chosen
+  clip (`AnimationView`). It works for the active character, or for the model file picked
+  in the dock.
+  - **Its header:** ↑/↓ to the clips before and after; whose clips they are (the file's
+    name or the character's, found once per Clips) and the clip; ▶ or ■, the loop, the
+    speed and the time, as the Clips have them.
+  - **Its ruler:** numbers as far apart as they read (`ruler_step`: the fewest of 1, 2, 5,
+    10… frames that leave 48 pixels between two), laid out by the width it had the frame
+    before, the playhead along it. A press or a drag scrubs through the Clips' own
+    `scrub_clip`.
+  - **Its row:** whose clips they are, their skeleton's joints and the clip's sample rate.
+- **Keys** (`ANIM_KEYS`, after a press in the tab, a hover region): ← and → step a frame,
+  Home and End go to the first and last frames (`step_frame`: the clip stops there, held,
+  as a scrub holds it), Space plays or stops.
+- **One playhead:** the tab is another view of `ClipsView`, so the Clips section and the
+  tab show the same clip, time and play.
+- **Nothing allocates while it draws:** the ruler's numbers are written into a buffer on
+  the stack, and its texts are the Clips' own (made once per Clips or per clip).
+- **Tests:**
+  - the ruler's steps, and frame steps held at the clip's ends;
+  - Alt+N's command opening and closing the tab;
+  - the Fox in the dock: Alt+N, a press on the ruler's middle puts the playhead at
+    1.708 s of Survey's 3.417 s, and → steps one frame (to 1.719 s, at 96 Hz);
+  - 0 allocations in 240 frames with the tab open while a picked file's clip plays (both
+    builds).
+- **Left (E12-3b on):** events (E adds one) and their sounds, a picked joint's trail and
+  speed curve, Mark Foot Plants, and the clips' loop and root motion settings in the
+  model's `.meta`.
+
 ## As built (E12-1b-3b, 2026-10-30): two clips side by side
 
 - **The model preview's second model** (`ModelPreview::beside`): a second clip's moment of

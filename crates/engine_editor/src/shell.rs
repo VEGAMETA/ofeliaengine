@@ -655,6 +655,36 @@ pub struct ClipsPanel<'a> {
     pub time: &'a str,
 }
 
+/// The Animation tab (ADR 0124's E12-3a): the inspector's Clips' chosen clip on a timeline
+/// (the active character's, or the model file's picked in the dock). Its header: ‹ and › to
+/// the clips beside it, the clip's title, ▶ or ■, the loop, the speed and the time. Then a
+/// ruler of its frames, the playhead along it (a press or a drag scrubs), and its row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationView<'a> {
+    /// Whose clips: "Fox".
+    pub subject: &'a str,
+    /// The chosen clip: "Walk".
+    pub clip: &'a str,
+    /// Shown instead of the timeline: nothing with clips chosen, or its skin being made.
+    pub note: &'a str,
+    /// It plays now.
+    pub playing: bool,
+    /// It plays looped.
+    pub looping: bool,
+    /// Its speed: "1×".
+    pub speed: &'a str,
+    /// Where it is: "frame 18 / 48 · 0.75 s".
+    pub time: &'a str,
+    /// Its last frame's number: the ruler runs from 0 to it.
+    pub frames: u32,
+    /// The playhead, 0 to 1 along the clip.
+    pub playhead: f32,
+    /// Its row: "24 joints".
+    pub joints: &'a str,
+    /// Its row: "sampled at 30 Hz".
+    pub sampled: &'a str,
+}
+
 /// A joint of the inspector's Skeleton (ADR 0124's E12-1c): its name and how deep below
 /// the skeleton's root it is.
 #[derive(Debug, Clone, Copy)]
@@ -1027,6 +1057,8 @@ pub struct ShellModel<'a> {
     pub profiler: Option<ProfilerView<'a>>,
     /// The mixer there instead, while the Audio tab is open (E11-1).
     pub mixer: Option<MixerView<'a>>,
+    /// The Animation tab's timeline there instead, while it is open (ADR 0124's E12-3a).
+    pub animation: Option<AnimationView<'a>>,
     /// The script debugger's panel there instead, while its tab is open.
     pub debugger: Option<DebuggerView<'a>>,
     /// The scene dock's History tab (E6-4) instead of the tree, while it is chosen: its
@@ -1174,6 +1206,20 @@ pub struct ShellResponse {
     pub clip_in_place: bool,
     /// The pointer is over them (E12-1b-3): a press there gives them the arrows.
     pub clips_hovered: bool,
+    /// The Animation tab (E12-3a): its ▶ or ■ was clicked.
+    pub anim_play: bool,
+    /// Its loop was toggled.
+    pub anim_loop: bool,
+    /// Its speed was clicked: the next one.
+    pub anim_speed: bool,
+    /// Its ‹ (-1) or › (1) was clicked: the clip before or after.
+    pub anim_clip_step: Option<isize>,
+    /// Its ruler was pressed, dragged along or let go.
+    pub anim_scrub: Option<WaveUse>,
+    /// The pointer is over it: a press there gives it the arrows.
+    pub anim_hovered: bool,
+    /// Its ruler's node this frame (0 when it is not drawn).
+    pub anim_ruler: u64,
     /// Their bar was pressed, dragged along or let go.
     pub clip_scrub: Option<WaveUse>,
     /// Their model's preview was pressed, dragged or let go: it turns.
@@ -1421,6 +1467,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         }
         if let Some(view) = &model.mixer {
             mixer_panel(ui, view, p, &mut out, &mut popups);
+        }
+        if let Some(view) = &model.animation {
+            animation_panel(ui, view, p, &mut out);
         }
         if let Some(view) = &model.debugger {
             debugger_panel(ui, view, p, &mut out);
@@ -5712,6 +5761,193 @@ fn mark_glyph(look: MarkLook) -> &'static str {
 
 /// The Tasks panel (ADR 0107 E6-3): what runs in the background, how far it is and for how
 /// long; nothing blocks the editor meanwhile.
+/// The Animation tab's panel (ADR 0124's E12-3a, [`AnimationView`]).
+fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut ShellResponse) {
+    const RULER: f32 = 22.0;
+    let panel = Style {
+        size: [Size::Grow(1.0), Size::Fixed(150.0)],
+        direction: Direction::Column,
+        padding: [8.0, 4.0, 8.0, 4.0],
+        gap: 4.0,
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    let id = ui.container("animation", panel, |ui| {
+        ui.row(
+            "head",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                gap: 4.0,
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                if panel_button(ui, "previous", icons::PREVIOUS, false, p) {
+                    out.anim_clip_step = Some(-1);
+                }
+                text(ui, "subject", view.subject, SMALL, p.text_dim);
+                text(ui, "dot", "\u{b7}", SMALL, p.text_dim);
+                text(ui, "clip", view.clip, SMALL, p.text);
+                if panel_button(ui, "next", icons::NEXT, false, p) {
+                    out.anim_clip_step = Some(1);
+                }
+                if view.note.is_empty() {
+                    let glyph = if view.playing {
+                        icons::STOP
+                    } else {
+                        icons::PLAY
+                    };
+                    if panel_button(ui, "play", glyph, false, p) {
+                        out.anim_play = true;
+                    }
+                    if panel_button(ui, "loop", icons::REPEAT, view.looping, p) {
+                        out.anim_loop = true;
+                    }
+                    let hovered = ui.is_hovered(ui.id("speed"));
+                    let speed = ui.container(
+                        "speed",
+                        Style {
+                            size: [Size::Fit, Size::Fixed(22.0)],
+                            padding: [6.0, 0.0, 6.0, 0.0],
+                            radius: 3.0,
+                            background: hovered.then_some(p.field_hover),
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "text", view.speed, SMALL, p.text);
+                        },
+                    );
+                    if ui.sense(speed, false).clicked {
+                        out.anim_speed = true;
+                    }
+                }
+                ui.spacer("fill");
+                text(ui, "time", view.time, SMALL, p.text_dim);
+            },
+        );
+        if !view.note.is_empty() {
+            text(ui, "note", view.note, SMALL, p.text_dim);
+            return;
+        }
+        // The ruler, laid out by the width it had last frame.
+        let width = ui.rect_of(ui.id("ruler")).map_or(600.0, |r| r.size[0]);
+        let ruler = ui.container(
+            "ruler",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(RULER)],
+                radius: 3.0,
+                clip: true,
+                background: Some(p.field),
+                ..Style::default()
+            },
+            |ui| {
+                // Its frame numbers, as far apart as they read, written in place.
+                let frames = view.frames.max(1);
+                let step = ruler_step(frames, width);
+                let mut number = [0u8; 10];
+                for k in (0..=frames).step_by(step as usize) {
+                    ui.push_id(u64::from(k));
+                    let x = (k as f32 / frames as f32 * width).round();
+                    ui.container(
+                        "tick",
+                        Style {
+                            size: [Size::Fixed(1.0), Size::Fixed(6.0)],
+                            background: Some(p.text_dim),
+                            placed: Some([x.min(width - 1.0), RULER - 6.0]),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                    ui.container(
+                        "number",
+                        Style {
+                            size: [Size::Fit, Size::Fit],
+                            placed: Some([(x + 3.0).min((width - 24.0).max(0.0)), 2.0]),
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "text", number_text(k, &mut number), SMALL, p.text_dim);
+                        },
+                    );
+                    ui.pop_id();
+                }
+                let x = (view.playhead.clamp(0.0, 1.0) * width).round();
+                ui.container(
+                    "playhead",
+                    Style {
+                        size: [Size::Fixed(2.0), Size::Fixed(RULER)],
+                        background: Some(p.accent),
+                        placed: Some([(x - 1.0).clamp(0.0, (width - 2.0).max(0.0)), 0.0]),
+                        ..Style::default()
+                    },
+                    |_| {},
+                );
+            },
+        );
+        out.anim_ruler = ruler;
+        let used = ui.sense(ruler, false);
+        if used.pressed || used.active || used.released {
+            out.anim_scrub = Some(WaveUse {
+                node: ruler,
+                pressed: used.pressed,
+                held: used.active,
+                released: used.released,
+            });
+        }
+        ui.row(
+            "row",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                padding: [6.0, 0.0, 6.0, 0.0],
+                gap: 10.0,
+                radius: 3.0,
+                background: Some(p.selection_dim),
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                text(ui, "subject", view.subject, SMALL, p.text);
+                text(ui, "joints", view.joints, SMALL, p.text_dim);
+                text(ui, "sampled", view.sampled, SMALL, p.text_dim);
+            },
+        );
+    });
+    ui.mark_region(id);
+    out.anim_hovered = ui.in_region(id);
+}
+
+/// The frames between the Animation tab's ruler's numbers (ADR 0124's E12-3a): the fewest of
+/// 1, 2, 5, 10, 20, 50… that leave 48 pixels between two numbers on a ruler `width` wide.
+pub fn ruler_step(frames: u32, width: f32) -> u32 {
+    let per_frame = width / frames.max(1) as f32;
+    let mut step = 1u32;
+    for k in 0..10 {
+        for m in [1, 2, 5] {
+            step = m * 10u32.pow(k);
+            if per_frame * step as f32 >= 48.0 {
+                return step;
+            }
+        }
+    }
+    step
+}
+
+/// `n` written into `buf`, without an allocation.
+fn number_text(n: u32, buf: &mut [u8; 10]) -> &str {
+    let mut i = buf.len();
+    let mut n = n;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 || i == 0 {
+            break;
+        }
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("")
+}
+
 fn tasks_panel(ui: &mut Ui, rows: &[TaskRow<'_>], p: &Palette) {
     let panel = Style {
         size: [Size::Grow(1.0), Size::Fixed(160.0)],
