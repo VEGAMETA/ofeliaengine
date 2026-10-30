@@ -1290,6 +1290,15 @@ Last updated: 2026-10-28.
     E12-5d-2 (layers and masks on the canvas, blends drawn as points, machines in
     machines, the character previewed in the corner) and 5e-2b (View: Animation States);
     5a to 5c, 5d-1, 5e-1 and 5e-2a are done, and E12-4.
+  - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а
+    10а):** 2D entities in the one world (the XY plane); metres, 16 pixels a metre by
+    default; tile cells in the scene by rows of 32-cell chunks through a palette; terrain
+    layers keep what was painted; terrains first, then LDtk-style rules; flipbooks are
+    `Animator` clips; sprite settings in the image's `.meta`; squares only in E13 (the
+    `grid` field kept); 2D lights with shadows and normal maps, the technique measured
+    (soft shadows and bounced light later, a step of their own); the scripts' tile map and
+    2D physics calls as proposed. E13 starts: E13-1's runtime (sprites, the orthographic
+    camera, the neutral output, the player's 2D pass) by an agent while E12 finishes.
   - **Settled (2026-10-30, team decisions 1а 2а 3б 4а 5а):** Luau's strict mode stays opt-in
     (`--!strict`, which New Script writes); transitions drawn in the editor inertialize by
     default (the file's default stays a cross-fade); compacting inertialization's per-joint

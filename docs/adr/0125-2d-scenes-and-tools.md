@@ -1,6 +1,8 @@
 # ADR 0125: 2D scenes, tile maps and the editor's 2D tools (E13)
 
-- Status: **Proposed** (2026-10-30). The ten questions at the end are the team's.
+- Status: **Accepted** (2026-10-30, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а 10а: every
+  question as recommended; 9в, soft shadows and bounced light, later as a step of its own).
+  The questions at the end keep their options for the record.
 - Research: [2D scenes' runtime](../research/2d-scenes.md) (tile map renderers, auto-tiling,
   atlases, 2D lights, tile collision for Box2D, pixel-perfect cameras) and [the 2D tools'
   UX](../research/ux/2d.md) (Godot, Unity, LDtk, Tiled, Aseprite, Paper2D).
