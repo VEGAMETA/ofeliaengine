@@ -129,6 +129,12 @@ impl Rig {
         self.root
     }
 
+    /// The joint whose ground motion is root motion (ADR 0124's E12-2c): the topmost skin
+    /// joint.
+    pub(crate) fn motion_root(&self) -> usize {
+        self.motion_root
+    }
+
     /// How root motion is read from a clip (ADR 0124's E12-2c): the motion of its topmost
     /// skin joint along the clip's own axes (E12-3e: by default across and about the mesh's
     /// up).
