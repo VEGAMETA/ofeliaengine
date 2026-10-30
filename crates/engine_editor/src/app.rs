@@ -677,6 +677,44 @@ pub fn editor<G: Game>(
 /// The rooms of the lists a frame builds for the shell. Their rows and labels borrow the
 /// editor and the world, so the lists cannot stay between frames, but their room does
 /// ([`recycle`]): a steady frame makes nothing (ADR 0107 §8).
+/// A parameter of the active character's graph in Play, as the inspector's Graph section
+/// shows it (ADR 0124's E12-5e-2): its name, kind, value as the last tick left it (or as the
+/// editor holds it), its number's text; its room kept from frame to frame.
+#[derive(Debug, Default)]
+struct LiveParam {
+    name: String,
+    kind: engine_anim::GraphParamKind,
+    value: f32,
+    held: bool,
+    text: String,
+}
+
+impl LiveParam {
+    /// As the player says it now.
+    fn set(&mut self, name: &str, kind: engine_anim::GraphParamKind, value: f32, held: bool) {
+        if self.name != name {
+            self.name.clear();
+            self.name.push_str(name);
+        }
+        let same = self.kind == kind && self.value.to_bits() == value.to_bits();
+        (self.kind, self.value, self.held) = (kind, value, held);
+        if !same || self.text.is_empty() {
+            self.write_text();
+        }
+    }
+
+    /// Its number's text: two decimals, none for a whole number.
+    fn write_text(&mut self) {
+        use std::fmt::Write as _;
+        self.text.clear();
+        let _ = if self.kind == engine_anim::GraphParamKind::Int {
+            write!(self.text, "{:.0}", self.value)
+        } else {
+            write!(self.text, "{:.2}", self.value)
+        };
+    }
+}
+
 #[derive(Default)]
 struct FrameLists {
     tree: Vec<TreeItem<'static>>,
@@ -698,6 +736,9 @@ struct FrameLists {
     asset_fields: Vec<Field<'static>>,
     /// A material file's shown values (E10-1c).
     material_values: Vec<&'static str>,
+    /// In Play, the Graph section's rows and its numbers' texts (ADR 0124's E12-5e).
+    live_fields: Vec<Field<'static>>,
+    live_values: Vec<&'static str>,
     sections: Vec<Section<'static>>,
     /// The mixer's strips, and the picked bus's outputs (E11-1).
     strips: Vec<crate::shell::StripView<'static>>,
@@ -3213,6 +3254,20 @@ struct Editor {
     anim_status: String,
     /// The character the shown graph tab watches in Play (E12-5e).
     anim_watched: Option<Entity>,
+    /// In Play, the active character's graph's parameters as its last tick left them, for
+    /// the inspector's Graph section (E12-5e-2): their room kept.
+    live_params: Vec<LiveParam>,
+    /// The character they are of.
+    live_entity: Option<Entity>,
+    /// The Graph section's place among the inspector's sections this frame.
+    live_section: Option<usize>,
+    /// The parameter typed into, and the one dragged with its value at the press.
+    live_typing: Option<usize>,
+    live_drag: Option<(usize, f32, bool)>,
+    /// The parameters held for testing (by character and slot), and the holds to give the
+    /// player (`None` lets one go).
+    live_holds: Vec<(Entity, u16)>,
+    holds_due: Vec<(Entity, u16, Option<f32>)>,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -4284,6 +4339,13 @@ impl Editor {
             anim_closed: Vec::new(),
             anim_status: String::new(),
             anim_watched: None,
+            live_params: Vec::new(),
+            live_entity: None,
+            live_section: None,
+            live_typing: None,
+            live_drag: None,
+            live_holds: Vec::new(),
+            holds_due: Vec::new(),
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -5317,7 +5379,9 @@ impl Editor {
         self.skeleton_section = None;
         let mut sound_section = None;
         let scale_value: [&str; 1];
-        let graph_now: [Field<'_>; 1];
+        let mut live_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.live_values));
+        let mut live_fields: Vec<Field<'_>> = recycle(std::mem::take(&mut self.lists.live_fields));
+        self.live_section = None;
         let bus_values: [&str; 3];
         let snapshot_value: [&str; 1];
         self.mixer_section = None;
@@ -5835,17 +5899,42 @@ impl Editor {
                 })
             }));
             // In Play, what the active character's graph does (ADR 0124's E12-5e), after
-            // its components.
+            // its components, then its parameters (E12-5e-2): numbers dragged or typed,
+            // flags and triggers clicked; a value set is held (↺ lets it go).
             if !self.anim_status.is_empty() {
-                graph_now = [Field {
+                live_values.extend(self.live_params.iter().map(|p| p.text.as_str()));
+                live_fields.push(Field {
                     name: "now",
                     widget: Widget::Text(&self.anim_status),
                     changed: false,
                     key: None,
-                }];
+                });
+                for (k, p) in self.live_params.iter().enumerate() {
+                    let widget = match p.kind {
+                        engine_anim::GraphParamKind::Float | engine_anim::GraphParamKind::Int => {
+                            Widget::Numbers {
+                                values: &live_values[k..=k],
+                                labels: &[],
+                                typing: (self.live_typing == Some(k)).then_some(0),
+                                lock: None,
+                            }
+                        }
+                        engine_anim::GraphParamKind::Bool
+                        | engine_anim::GraphParamKind::Trigger => {
+                            Widget::Check(Some(p.value > 0.5))
+                        }
+                    };
+                    live_fields.push(Field {
+                        name: &p.name,
+                        widget,
+                        changed: p.held,
+                        key: None,
+                    });
+                }
+                self.live_section = Some(sections.len());
                 sections.push(Section {
                     title: "Graph",
-                    fields: &graph_now,
+                    fields: &live_fields,
                     script: "",
                     removable: false,
                 });
@@ -7122,6 +7211,8 @@ impl Editor {
         self.lists.fields = recycle(fields);
         self.lists.asset_fields = recycle(asset_fields);
         self.lists.material_values = recycle(material_values);
+        self.lists.live_fields = recycle(live_fields);
+        self.lists.live_values = recycle(live_values);
         self.lists.values = recycle(values);
         self.lists.spans = spans;
         self.lists.tree = recycle(items);
@@ -7863,6 +7954,8 @@ impl Editor {
         if let Some(event) = response.field {
             if Some(event.section) == self.graph_section {
                 self.edit_graph_node(world, event);
+            } else if Some(event.section) == self.live_section {
+                self.edit_live_param(world, event);
             } else if let Some(k) = self.anim_row_at(event.section, event.field) {
                 self.edit_anim(world, k, event);
             } else if Some(event.section) == self.snapshot_section {
@@ -7901,6 +7994,8 @@ impl Editor {
                 };
                 if Some(section) == self.graph_section {
                     self.edit_graph_node(world, event);
+                } else if Some(section) == self.live_section {
+                    self.edit_live_param(world, event);
                 } else if let Some(k) = self.anim_row_at(section, field) {
                     self.edit_anim(world, k, event);
                 } else if Some(section) == self.snapshot_section {
@@ -22085,6 +22180,105 @@ impl Editor {
         }
     }
 
+    /// A parameter of the active character's graph changed in Play's Graph section (ADR
+    /// 0124's E12-5e-2): a number dragged (as every number is, whole for an Int) or typed (an
+    /// expression of its value), a flag clicked: held there for testing, over what the
+    /// game sets, until ↺ lets it go or Play stops; a trigger clicked: fired once. Not
+    /// steps of the history: the run is put back at Stop.
+    fn edit_live_param(&mut self, world: &mut World, event: FieldEvent) {
+        let (Some(e), Some(k)) = (self.live_entity, event.field.checked_sub(1)) else {
+            return;
+        };
+        let Some(p) = self.live_params.get(k) else {
+            return;
+        };
+        let (slot, kind, value) = (k as u16, p.kind, p.value);
+        let whole = |v: f32| {
+            if kind == engine_anim::GraphParamKind::Int {
+                v.round()
+            } else {
+                v
+            }
+        };
+        let hold = match event.action {
+            FieldAction::Drag { travel, start, .. } => {
+                let ours = matches!(self.live_drag, Some((d, ..)) if d == k);
+                if start || !ours {
+                    self.live_drag = Some((k, value, false));
+                    self.live_typing = None;
+                    return;
+                }
+                let Some((_, from, moved)) = self.live_drag.as_mut() else {
+                    return;
+                };
+                if travel != 0.0 {
+                    *moved = true;
+                }
+                let from = *from;
+                let quantity = if kind == engine_anim::GraphParamKind::Int {
+                    Quantity::Integer
+                } else {
+                    Quantity::Number { step: None }
+                };
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                Some(
+                    self.snapping
+                        .drag(quantity, f64::from(from), travel, shift, ctrl)
+                        as f32,
+                )
+            }
+            FieldAction::Release => {
+                // A press and release without moving: type the number instead.
+                if let Some((d, _, moved)) = self.live_drag.take()
+                    && d == k
+                    && !moved
+                {
+                    self.live_typing = Some(k);
+                }
+                return;
+            }
+            FieldAction::Typed { commit, .. } => {
+                self.live_typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                match crate::expr::evaluate(&text, f64::from(value)) {
+                    Ok(v) => Some(whole(v as f32)),
+                    Err(reason) => {
+                        self.say(format!("{}: {reason}", self.live_params[k].name));
+                        return;
+                    }
+                }
+            }
+            FieldAction::Toggle if kind == engine_anim::GraphParamKind::Trigger => {
+                if let Some(animator) = world.get_mut::<engine_runtime::Animator>(e) {
+                    animator.fire_slot(slot);
+                }
+                return;
+            }
+            FieldAction::Toggle => Some(if value > 0.5 { 0.0 } else { 1.0 }),
+            FieldAction::Reset => {
+                self.live_holds.retain(|&h| h != (e, slot));
+                self.holds_due.push((e, slot, None));
+                return;
+            }
+            _ => None,
+        };
+        if let Some(v) = hold {
+            if !self.live_holds.contains(&(e, slot)) {
+                self.live_holds.push((e, slot));
+            }
+            self.holds_due.push((e, slot, Some(v)));
+            // Shown at once, before the next tick says it.
+            if let Some(p) = self.live_params.get_mut(k) {
+                p.value = v;
+                p.held = true;
+                p.write_text();
+            }
+        }
+    }
+
     /// Animation graphs live with the player (ADR 0124's E12-5e): each graph tab's file given
     /// to the player as it changes, played in place of the file from the next tick (its
     /// characters go on in the states they are in; what the canvas alone shows, a state's
@@ -22109,6 +22303,13 @@ impl Editor {
         }
         let playing = self.play.is_some();
         let active = self.selection.last().copied();
+        for (e, slot, value) in self.holds_due.drain(..) {
+            player.hold_graph_param(e, slot, value);
+        }
+        if !playing {
+            // The player lets its holds go at the run's end.
+            self.live_holds.clear();
+        }
         self.anim_status.clear();
         if playing
             && let Some(e) = active
@@ -22116,6 +22317,25 @@ impl Editor {
         {
             crate::agraph::write_now(&mut self.anim_status, &now);
         }
+        // Its parameters, for the Graph section (E12-5e-2), their rows' room kept.
+        let params = active
+            .filter(|_| playing && !self.anim_status.is_empty())
+            .and_then(|e| Some((e, player.graph_params(e)?)));
+        let mut n = 0;
+        if let Some((e, params)) = params {
+            for (k, (name, kind, value)) in params.enumerate() {
+                if self.live_params.len() == k {
+                    self.live_params.push(LiveParam::default());
+                }
+                let held = self.live_holds.contains(&(e, k as u16));
+                self.live_params[k].set(name, kind, value, held);
+                n = k + 1;
+            }
+            self.live_entity = Some(e);
+        } else {
+            self.live_entity = None;
+        }
+        self.live_params.truncate(n);
         let shown = self.active_graph.and_then(|g| self.graphs.get_mut(g));
         let Some((id, anim)) = shown.and_then(|d| Some((d.id, d.anim.as_deref_mut()?))) else {
             self.anim_watched = None;
@@ -27874,6 +28094,18 @@ impl<G> EditorGame<G> {
     /// For tests.
     pub fn graph_now(&self) -> String {
         self.shared.borrow().anim_status.clone()
+    }
+
+    /// In Play, the active character's graph's parameters as the inspector's Graph section
+    /// shows them (ADR 0124's E12-5e-2): each one's name, value and whether the editor holds
+    /// it. For tests.
+    pub fn graph_params(&self) -> Vec<(String, f32, bool)> {
+        self.shared
+            .borrow()
+            .live_params
+            .iter()
+            .map(|p| (p.name.clone(), p.value, p.held))
+            .collect()
     }
 
     /// The Debugger panel's header as it reads (what stopped, where, the entity and the
@@ -43694,5 +43926,67 @@ return Coin
         for mode in ViewMode::ALL {
             assert_eq!(ViewMode::from_name(mode.name()), Some(mode));
         }
+    }
+
+    /// ADR 0124's E12-5e-2: the Graph section's parameters in Play. A number pressed holds
+    /// nothing; dragged, it is held (given to the player in the next frame) and marked; a
+    /// press and release without moving types it; a flag clicked is held flipped; a
+    /// trigger clicked fires on the animator and holds nothing; ↺ lets a hold go.
+    #[test]
+    fn a_graphs_parameters_in_play_are_held_or_fired() {
+        use engine_anim::GraphParamKind;
+        let dir = project("graph-live-params");
+        let (mut world, mut ed) = start(&dir);
+        let fox = world.spawn((engine_runtime::Animator::default(),));
+        let param = |name: &str, kind, value| LiveParam {
+            name: name.to_owned(),
+            kind,
+            value,
+            held: false,
+            text: String::new(),
+        };
+        ed.live_entity = Some(fox);
+        ed.live_params = vec![
+            param("speed", GraphParamKind::Float, 0.5),
+            param("grounded", GraphParamKind::Bool, 1.0),
+            param("jump", GraphParamKind::Trigger, 0.0),
+        ];
+        let event = |field, action| FieldEvent {
+            section: 0,
+            field,
+            action,
+        };
+        let drag = |travel, start| FieldAction::Drag {
+            part: 0,
+            travel,
+            start,
+        };
+        ed.edit_live_param(&mut world, event(1, drag(0.0, true)));
+        assert!(ed.holds_due.is_empty(), "a press alone holds nothing");
+        ed.edit_live_param(&mut world, event(1, drag(40.0, false)));
+        let (e, slot, value) = *ed.holds_due.last().unwrap();
+        assert_eq!((e, slot), (fox, 0));
+        assert!(value.unwrap() > 0.5, "{value:?}");
+        assert!(ed.live_holds.contains(&(fox, 0)) && ed.live_params[0].held);
+        ed.edit_live_param(&mut world, event(1, FieldAction::Release));
+        assert_eq!(ed.live_typing, None, "a drag types nothing");
+        ed.edit_live_param(&mut world, event(1, drag(0.0, true)));
+        ed.edit_live_param(&mut world, event(1, FieldAction::Release));
+        assert_eq!(ed.live_typing, Some(0), "a click types the number");
+        // The flag, held flipped.
+        ed.edit_live_param(&mut world, event(2, FieldAction::Toggle));
+        assert_eq!(*ed.holds_due.last().unwrap(), (fox, 1, Some(0.0)));
+        // The trigger, fired on the animator.
+        let given = ed.holds_due.len();
+        ed.edit_live_param(&mut world, event(3, FieldAction::Toggle));
+        assert_eq!(ed.holds_due.len(), given, "nothing held");
+        let animator = world.get::<engine_runtime::Animator>(fox).unwrap();
+        assert_eq!(animator.params[2], 1.0, "fired");
+        assert!(animator.params_set & 1 << 2 != 0);
+        // ↺ lets speed go.
+        ed.edit_live_param(&mut world, event(1, FieldAction::Reset));
+        assert_eq!(*ed.holds_due.last().unwrap(), (fox, 0, None));
+        assert!(!ed.live_holds.contains(&(fox, 0)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -584,6 +584,33 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5e-2a, 2026-10-30): a graph's parameters in Play
+
+- **The inspector's Graph section** lists, under `now`, the active character's graph
+  parameters as its last tick left them (`Player::graph_params`, allocation-free): numbers
+  dragged (as every number is: Shift for steps, Ctrl to round; whole for an Int) or typed
+  (an expression of the value), flags and triggers as checkboxes.
+- **A value set is held for testing** (`Player::hold_graph_param`): put into the graph's
+  state over what the animator and the game's scripts set, after them and before each of
+  its ticks, until ↺ lets it go or Play stops (`Player::end_run` lets every hold go). The
+  animator keeps the game's own value: a hold is never written back into it, so a hold
+  let go leaves what the game set. (Unity's Animator window sets the parameter itself,
+  which a script setting it every frame overrides at once.)
+- **A trigger clicked fires once** on the animator (`Animator::fire_slot`), held by
+  nothing: the transition that takes it uses it up.
+- **Not steps of the history:** Play's world is put back at Stop, and the holds are the
+  run's.
+- **Tests:**
+  - in the editor (CPU): a number pressed holds nothing, dragged it is held and marked, a
+    press and release without moving types it; a flag clicked is held flipped; a trigger
+    clicked fires on the animator and holds nothing; ↺ lets the hold go;
+  - on the Radeon, the Fox: `speed` held at 1 over the game's 0 takes it to Move, the
+    graph tells 1 while the animator keeps 0; let go, it rests again;
+  - the editor on the Radeon: in Play the selected fox's Graph section lists `speed` at
+    the tab's 1, not held; nothing after Stop.
+- **Left (E12-5e-2b):** View: Animation States, every character's state labelled in the
+  viewport.
+
 ## As built (E12-5e-1, 2026-10-30): the graph's tab live with the player
 
 - **The tab plays as it holds the graph:** an `.agraph` tab gives the player its graph each
@@ -616,8 +643,8 @@ allocation with transitions and events every tick; the same events at the same t
   the next Play went on from there). A run's end (`Player::end_run`) now lets them go; the
   next frame makes each anew from its animator as the world was put back.
 - **Not yet (E12-5e-2):** the parameters' live values in the inspector (a typed value held
-  for testing), View: Animation States labelling every character in the viewport, the
-  layers above the first.
+  for testing; since built, 5e-2a), View: Animation States labelling every character in
+  the viewport, the layers above the first.
 - **Tests:**
   - `engine_anim`: a machine's state, fade and place through Idle, a fade into a blend, the
     fade over, a jump taken at once; a layer it has not;

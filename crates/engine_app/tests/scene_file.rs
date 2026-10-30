@@ -3705,6 +3705,19 @@ fn a_fox_plays_an_animation_graph() {
         &mut game,
         "the file given back as the copy was",
     );
+    // E12-5e-2: `speed` held at 1 for testing, over the 0 the game set: it moves, the graph
+    // tells 1, the animator keeps the game's 0; let go, the game's 0 again: it rests.
+    player.hold_graph_param(fox, speed, Some(1.0));
+    until(&mut player, &mut game, "Move");
+    let told: Vec<(String, f32)> = player
+        .graph_params(fox)
+        .unwrap()
+        .map(|(name, _, value)| (name.to_owned(), value))
+        .collect();
+    assert!(told.contains(&(String::from("speed"), 1.0)), "{told:?}");
+    assert_eq!(animator(&mut player).params[usize::from(speed)], 0.0);
+    player.hold_graph_param(fox, speed, None);
+    until(&mut player, &mut game, "Idle");
     // The editor's copy of the graph in place of the file: its states made anew.
     let mut edited = graph.clone();
     edited.states.get_mut("idle").unwrap().name = "Rest".into();

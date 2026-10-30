@@ -1427,6 +1427,24 @@ impl Player {
         self.assets.graph_now(e)
     }
 
+    /// The parameters of entity `e`'s animation graph as its last tick left them (ADR 0124's
+    /// E12-5e): each one's name, kind and value, by slot (its place among the graph's
+    /// names). `None` for a character playing no graph. Allocates nothing.
+    pub fn graph_params(
+        &self,
+        e: Entity,
+    ) -> Option<impl Iterator<Item = (&str, engine_anim::GraphParamKind, f32)> + '_> {
+        self.assets.graph_params(e)
+    }
+
+    /// Holds parameter `slot` of entity `e`'s animation graph at `value` for testing (ADR
+    /// 0124's E12-5e: the editor's typed value in Play): put in over what its animator and
+    /// the game's scripts set, before each of its ticks, until `None` lets it go or the run
+    /// ends ([`Self::end_run`]).
+    pub fn hold_graph_param(&mut self, e: Entity, slot: u16, value: Option<f32>) {
+        self.assets.hold_graph_param(e, slot, value);
+    }
+
     /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c): in
     /// the entity's space (its transform places them as it places the skinned mesh), in its
     /// skeleton's order (the rig's [`crate::Rig::skeleton`] gives their parents), into

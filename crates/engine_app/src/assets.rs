@@ -862,6 +862,9 @@ pub struct Assets {
     fields: crate::field_clips::FieldClips,
     /// The animation graphs animators play (`.agraph`, ADR 0124's E12-5c).
     graphs: crate::graphs::Graphs,
+    /// Graph parameters the editor holds for testing (ADR 0124's E12-5e): the character, the
+    /// slot and the value, put in over what its animator says before each tick of its graph.
+    held_params: Vec<(Entity, u16, f32)>,
 }
 
 /// A skinned mesh made (ADR 0124's E12-1a): a skin per part in `Skinning`, and its rig.
@@ -1282,6 +1285,7 @@ impl Assets {
             preview_skin: None,
             fields: crate::field_clips::FieldClips::default(),
             graphs: crate::graphs::Graphs::default(),
+            held_params: Vec::new(),
         }
     }
 
@@ -3379,8 +3383,13 @@ impl Assets {
             return;
         }
         engine_profiler::zone!("app::Assets::tick_graphs");
-        let (graphs, paths, root, posing) =
-            (&mut self.graphs, &self.paths, &self.root, &mut self.posing);
+        let (graphs, paths, root, posing, held) = (
+            &mut self.graphs,
+            &self.paths,
+            &self.root,
+            &mut self.posing,
+            &self.held_params,
+        );
         for (&e, owned) in &mut self.owned {
             if owned.held {
                 continue;
@@ -3398,6 +3407,10 @@ impl Assets {
             };
             let graph = &play.cooked.graph;
             set_params(&mut play.state, animator, graph);
+            // What the editor holds wins over the game's (E12-5e).
+            for &(_, slot, value) in held.iter().filter(|h| h.0 == e) {
+                play.state.set(slot, value);
+            }
             // Root motion out of its pose where the game moves it by it (E12-5c-2).
             play.state
                 .set_in_place(animator.root_motion != RootMotion::InPose);
@@ -3412,6 +3425,11 @@ impl Assets {
             }
             let count = graph.params().count().min(MAX_GRAPH_PARAMS);
             for (k, value) in animator.params.iter_mut().enumerate().take(count) {
+                // A value the editor holds stays the editor's: the game's own comes back
+                // when it lets go (E12-5e-2).
+                if held.iter().any(|h| h.0 == e && usize::from(h.1) == k) {
+                    continue;
+                }
                 *value = play.state.get(k as u16);
             }
             let name = graph.state_name(&play.state, 0).unwrap_or_default();
@@ -3751,6 +3769,42 @@ impl Assets {
                 owned.posed = false;
             }
         }
+        self.held_params.clear();
+    }
+
+    /// Parameter `slot` of entity `e`'s animation graph held at `value` for testing (ADR
+    /// 0124's E12-5e), over what its animator and the game set, from its next tick until
+    /// `None` lets it go or the run ends.
+    pub(crate) fn hold_graph_param(&mut self, e: Entity, slot: u16, value: Option<f32>) {
+        let at = self
+            .held_params
+            .iter()
+            .position(|&(he, s, _)| he == e && s == slot);
+        match (at, value) {
+            (Some(k), Some(v)) => self.held_params[k].2 = v,
+            (None, Some(v)) => self.held_params.push((e, slot, v)),
+            (Some(k), None) => {
+                self.held_params.swap_remove(k);
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// The parameters of entity `e`'s animation graph as its last tick left them (ADR 0124's
+    /// E12-5e): each one's name, kind and value, by slot. None for a character playing no
+    /// graph.
+    pub(crate) fn graph_params(
+        &self,
+        e: Entity,
+    ) -> Option<impl Iterator<Item = (&str, engine_anim::GraphParamKind, f32)> + '_> {
+        let play = self.owned.get(&e)?.graph.as_ref()?;
+        Some(
+            play.cooked
+                .graph
+                .params()
+                .enumerate()
+                .map(move |(k, (name, kind, _))| (name, kind, play.state.get(k as u16))),
+        )
     }
 
     /// Where entity `e`'s animation graph's first layer that plays a machine is now (ADR

@@ -879,6 +879,11 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5e-2a, a graph's parameters in Play** (#488, ADR 0124's as-built): the
+    inspector's Graph section lists the selected character's parameters as its graph has
+    them; a number dragged or typed, a flag clicked is held for testing over what the
+    game sets (after the scripts, before each graph tick; the animator keeps the game's
+    value) until ↺ or Stop; a trigger clicked fires once.
   - **E13 research: 2D scenes, tile maps and the 2D tools** (#487, agent Г; ADR 0125
     proposed): the runtime note (tile map renderers, auto-tiling, atlases, 2D lights, tile
     collision for Box2D v3, pixel-perfect cameras) and the UX note (Godot, Unity, LDtk,
@@ -1283,8 +1288,17 @@ Last updated: 2026-10-28.
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
     E12-5d-2 (layers and masks on the canvas, blends drawn as points, machines in
-    machines, the character previewed in the corner) and 5e-2 (the parameters' live
-    values in Play, View: Animation States); 5a to 5c, 5d-1 and 5e-1 are done, and E12-4.
+    machines, the character previewed in the corner) and 5e-2b (View: Animation States);
+    5a to 5c, 5d-1, 5e-1 and 5e-2a are done, and E12-4.
+  - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а
+    10а):** 2D entities in the one world (the XY plane); metres, 16 pixels a metre by
+    default; tile cells in the scene by rows of 32-cell chunks through a palette; terrain
+    layers keep what was painted; terrains first, then LDtk-style rules; flipbooks are
+    `Animator` clips; sprite settings in the image's `.meta`; squares only in E13 (the
+    `grid` field kept); 2D lights with shadows and normal maps, the technique measured
+    (soft shadows and bounced light later, a step of their own); the scripts' tile map and
+    2D physics calls as proposed. E13 starts: E13-1's runtime (sprites, the orthographic
+    camera, the neutral output, the player's 2D pass) by an agent while E12 finishes.
   - **Settled (2026-10-30, team decisions 1а 2а 3б 4а 5а):** Luau's strict mode stays opt-in
     (`--!strict`, which New Script writes); transitions drawn in the editor inertialize by
     default (the file's default stays a cross-fade); compacting inertialization's per-joint

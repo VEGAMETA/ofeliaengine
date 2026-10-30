@@ -323,6 +323,10 @@ if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(
 - **Where it is** (E12-5e): `player.graph_now(entity)` tells its first machine's state, the
   state it fades from and how far, and how far the state has played (the editor shows it
   in Play on the graph's tab and in the inspector). It allocates nothing.
+  `player.graph_params(entity)` lists its parameters as its last tick left them, and
+  `player.hold_graph_param(entity, slot, Some(value))` holds one there for testing over
+  what the game sets (what the editor's Graph section does in Play) until `None` or the
+  run's end.
 
 ```text
 [agraph version=1 id=…]
