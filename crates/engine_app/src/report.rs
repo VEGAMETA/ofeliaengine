@@ -68,6 +68,9 @@ pub struct FrameReport {
     pub upload: f64,
     /// Preparing the view, declaring the frame's passes, the UI.
     pub compose: f64,
+    /// Of `compose`, a 2D view's sprites (ADR 0125): their images' textures found, the
+    /// sprites read, placed between ticks, culled, keyed and sorted into the canvas.
+    pub sprites: f64,
     /// Compiling and recording the frame graph.
     pub execute: f64,
     /// Submitting.

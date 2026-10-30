@@ -87,6 +87,7 @@ pub mod scripts;
 mod settings;
 mod skins;
 mod sound;
+mod sprites;
 mod text;
 mod videos;
 
@@ -136,6 +137,7 @@ pub use sound::{
     PlayMode, PreviewState, ReverbZone, Room, RoomFrom, RoomHeard, RoomLayout, Routes, SendLayout,
     SnapshotLayout, SnapshotTarget, SoundFiles, Waveform, snapshot_target, waveform,
 };
+pub use sprites::{SORTING_FILE_EXTENSION, SortGroup, SortingFile, SortingLayer, Sprite};
 pub use text::TextSource;
 
 /// The mixer's built-in effects as files and the editor name them (ADR 0121): each kind,

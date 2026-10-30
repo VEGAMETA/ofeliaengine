@@ -59,11 +59,13 @@ engine_log.workspace = true
 serde_json = "1"
 # Skinned models posed by the player and their clips (ADR 0124's E12-1a).
 engine_anim.workspace = true
+# Plain-data proofs for the 2D components (`Sprite`, `SortGroup`: ADR 0125), replicable as
+# any (the version and features engine_ecs and engine_runtime use; already in the tree).
+bytemuck = { version = "1.25", features = ["derive"] }
 
 [dev-dependencies]
 # The flight example: skinned characters (glTF Fox) cooked through the derived data cache,
 # its PSO record.
-bytemuck = { version = "1.25", features = ["derive"] }
 engine_assets.workspace = true
 # A material graph's editing build, for its node previews' test (ADR 0123's E10-4g).
 engine_material_graph.workspace = true

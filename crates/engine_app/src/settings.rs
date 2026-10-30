@@ -182,6 +182,10 @@ pub struct PlayerSettings {
     /// Sound (ADR 0105): the sounds' folder, the buses, the acoustics. The world's
     /// [`crate::Mixer`] resource sets the buses' volumes.
     pub audio: crate::AudioSettings,
+    /// The project's 2D sorting layers (ADR 0125): the `.sorting` file at this path under
+    /// the project (`main.sorting`), their names and which sort by y. Without the file,
+    /// every layer sorts by order.
+    pub sorting: PathBuf,
     /// Networking (ADR 0106): the game's input type and schema
     /// (`NetConfig::new::<Input>(schema)`); the world's [`crate::Network`] resource hosts,
     /// joins and leaves. `None`: singleplayer only.
@@ -330,6 +334,7 @@ impl Default for PlayerSettings {
             input: None,
             saves: crate::SaveSettings::default(),
             audio: crate::AudioSettings::default(),
+            sorting: PathBuf::from("main.sorting"),
             network: None,
             physics: None,
         }
