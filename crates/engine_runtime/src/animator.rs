@@ -112,8 +112,14 @@ pub struct Animator {
     /// Its graph's parameters, by the slots its graph names them in ([`GraphParams`]): a
     /// number, a flag's 0 or 1, a trigger's count of fires not yet taken by a transition.
     /// Scripts set them by name (`animator:set("speed", 3.5)`, `animator:trigger("jump")`).
+    /// The player writes the graph's values back after each tick: those not set, and the
+    /// triggers a transition took.
     #[reflect(hidden)]
     pub params: [f32; MAX_GRAPH_PARAMS],
+    /// Which of `params` were set ([`Self::set`], [`Self::trigger`]): bit `k` for slot `k`.
+    /// The others follow the graph's values, its starting ones until it changes them.
+    #[reflect(hidden)]
+    pub params_set: u16,
     /// The state its graph's first layer is in, by name, as the last tick left it (empty
     /// without a graph): what scripts read as `animator.state`. Not sent over the network:
     /// every peer's graph makes its own.
@@ -151,6 +157,7 @@ impl Default for Animator {
             turned: 0.0,
             graph: AssetRef::NONE,
             params: [0.0; MAX_GRAPH_PARAMS],
+            params_set: 0,
             state: String::new(),
         }
     }
@@ -186,24 +193,40 @@ impl Animator {
     /// trigger (fired by [`Self::trigger`], not set).
     pub fn set(&mut self, params: &GraphParams, name: &str, value: f32) -> bool {
         match params.slot(self.graph.file, name) {
-            Some((slot, false)) => {
-                self.params[usize::from(slot)] = value;
-                true
-            }
+            Some((slot, false)) => self.set_slot(slot, value),
             _ => false,
         }
+    }
+
+    /// The parameter in slot `slot` set to `value` ([`Self::set`] by its slot). False for a
+    /// slot past [`MAX_GRAPH_PARAMS`].
+    pub fn set_slot(&mut self, slot: u16, value: f32) -> bool {
+        let Some(param) = self.params.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        *param = value;
+        self.params_set |= 1 << slot;
+        true
     }
 
     /// Trigger `name` of its graph fired: it holds until a transition takes it. False when
     /// the graph has no such trigger.
     pub fn trigger(&mut self, params: &GraphParams, name: &str) -> bool {
         match params.slot(self.graph.file, name) {
-            Some((slot, true)) => {
-                self.params[usize::from(slot)] += 1.0;
-                true
-            }
+            Some((slot, true)) => self.fire_slot(slot),
             _ => false,
         }
+    }
+
+    /// The trigger in slot `slot` fired ([`Self::trigger`] by its slot). False for a slot
+    /// past [`MAX_GRAPH_PARAMS`].
+    pub fn fire_slot(&mut self, slot: u16) -> bool {
+        let Some(param) = self.params.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        *param += 1.0;
+        self.params_set |= 1 << slot;
+        true
     }
 
     /// Plays clip `clip` from its start, fading from what plays now over `fade` seconds (at
@@ -650,6 +673,9 @@ mod tests {
         assert!(a.trigger(&params, "jump"));
         assert!(a.trigger(&params, "jump"));
         assert_eq!(&a.params[..2], &[3.5, 2.0]);
+        assert_eq!(a.params_set, 0b11, "both marked set");
+        assert!(!a.set_slot(16, 1.0), "past the slots: nothing, no panic");
+        assert!(!a.fire_slot(u16::MAX));
         assert!(!a.set(&params, "jump", 1.0), "a trigger is fired, not set");
         assert!(!a.trigger(&params, "speed"), "a number is set, not fired");
         assert!(!a.set(&params, "sped", 1.0));

@@ -584,6 +584,51 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5c-1, 2026-10-30): the player plays graphs
+
+- **The `Animator`** names its graph in `graph` (an `.agraph`; none plays `clip` as before).
+  Its parameters are `params`, by slot (a slot is a parameter's place among the graph's
+  names in their order); `params_set` marks the slots set by `set`/`trigger` (or
+  `set_slot`/`fire_slot`); the others follow the graph's values, its starting ones until a
+  transition changes them, so a graph edited later moves its defaults with it. `state` is
+  the first layer's state by name.
+- **A graph file** (`engine_app::graphs`) is read the first time an animator names it (or
+  taken from the editor while it edits it, `Assets::set_anim_graph`, as clips are) and
+  turned into a `GraphDesc`: ids become indices (layers by `order`, the rest by id); a
+  machine without an entry starts in its first state, a state without a name is named by
+  its id, an id that names nothing becomes an index out of range for the cook to name.
+- **Its parameters reach scripts before they run:** at each tick's start the player passes
+  over the animators and reads each graph not read yet, telling its names to the world's
+  `GraphParams`; a run of animators naming one graph looks it up once. So a script's
+  `set` finds its slot even on the tick its character appeared, before its model loads.
+- **Cooked once per rig** (file × rig, the rig kept alive by the cache): the clips found by
+  name among the model's (`Clip 2` for an unnamed second, as `Animator::clip`), each one's
+  length and whether its `.meta` plays it once; the additive layers' references prepared.
+  What cannot be cooked is told once in the log. A model read again or its clip settings
+  edited cook its graphs again; a graph file written anew is read and cooked again.
+- **Each character** gets a `GraphState` when it plays a graph: its entry states, the
+  parameters its animator set put in, weighed once (a tick of 0 s), so a still world (the
+  editor) shows its first pose. A cooked graph or file that changed makes a new state; a
+  generation number makes the check one comparison a character.
+- **A tick** (after the scripts' and the animators', before the game's): the set parameters
+  go in, the graph ticks by `dt` times the animator's `speed` (held while `paused`, or at a
+  speed below 0: graphs do not play backwards), every parameter comes back (a trigger a
+  transition took is 0 again), and the first layer's state is written to `state` (its room
+  kept). Ticks the network plays again move nothing: a graph's state is the player's, not
+  part of what the network rolls back.
+- **A frame** poses each character from its graph between its last two ticks
+  (`Posing::palette_graph`, one `GraphWork` sized for the largest rig); sockets and
+  `Player::model_joints` take the same pose (sockets at the tick's moment).
+- **A graph that cannot be read** shows the rest pose (and is told once in the log).
+- **Not yet:** a graph's root motion stays in its pose and its clips fire no events (5c-2,
+  with saves of its state); its clips are the model's, not the animator's own `.anim`
+  clips; inertialized transitions cross-fade (5b-2, in parallel).
+- **Measured:** 0 allocations in 607 frames of CesiumMan's `zero_alloc_skins` with a fourth
+  character playing a graph (two states cross-faded by a number set every 120 frames, a
+  trigger from any state every 90, a layer masked to an arm, an additive one), next to the
+  others; the Fox GPU test on the Radeon goes Idle → Move → Alert → Move → Idle by its
+  parameters, the editor's copy renaming a state, a missing graph at the rest pose.
+
 ## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
 
 - **What a graph is made from:** `engine_anim::GraphDesc`, its parts by index (parameters,
