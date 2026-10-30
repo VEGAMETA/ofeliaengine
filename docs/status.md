@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-4a, clips made in the editor** (#PR, ADR 0124's as-built): `.anim` files of
+  - **E12-4a, clips made in the editor** (#468, ADR 0124's as-built): `.anim` files of
     keyed fields (one track per `Component.field`, below-entity paths, Euler rotations,
     smooth/linear/step keys, events, once), played by any entity's `Animator` through its
     new `clips` (name to file) each tick after the animators move on; bindings kept per
