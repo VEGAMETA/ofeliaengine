@@ -293,6 +293,12 @@ impl Previews {
         }
     }
 
+    /// The live preview drawn again next frame, though asked the same (its pose's source
+    /// changed: a graph played or let go, E12-5d-2d).
+    pub(crate) fn redraw_live(&mut self) {
+        self.live_drawn = None;
+    }
+
     /// The live model preview asked for, or none (ADR 0124's E12-1b).
     pub(crate) fn set_live(&mut self, preview: Option<ModelPreview>) {
         self.live = preview;
@@ -327,7 +333,8 @@ impl Previews {
         frame: u64,
     ) -> Option<LiveDrawing> {
         let live = self.live?;
-        if self.live_drawn == Some(live) {
+        // A graph playing on it moves it every frame (E12-5d-2d).
+        if self.live_drawn == Some(live) && !assets.preview_graph_plays() {
             return None;
         }
         let (mesh, material, root) = assets.preview_draw(materials)?;

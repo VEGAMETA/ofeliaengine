@@ -277,6 +277,10 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     let mut pixels = Vec::new();
     let mut taken = 0u32;
     let mut heard = 0usize;
+    // ... playing the dancer's graph in place of its clip (E12-5d-2d), its speed held by the
+    // editor and changed now and then.
+    player.preview_graph(Some(graph_file));
+    player.hold_preview_param(0, Some(1.0));
     counting::assert_steady_state_each(
         &mut player,
         &mut game,
@@ -308,6 +312,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
             if frames.is_multiple_of(120) {
                 fast = !fast;
                 dance(player, Some(fast));
+                player.hold_preview_param(0, Some(if fast { 3.0 } else { 1.0 }));
             }
             if frames.is_multiple_of(90) {
                 dance(player, None);

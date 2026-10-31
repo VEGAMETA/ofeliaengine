@@ -862,6 +862,7 @@ pub struct Assets {
     event_sounds: Vec<(Entity, Arc<str>)>,
     /// The editor's model preview's skin (ADR 0124's E12-1b).
     preview_skin: Option<PreviewSkin>,
+    preview_graph: Option<PreviewGraph>,
     /// The clips made in the editor (`.anim`, ADR 0124's E12-4a) and their animators.
     fields: crate::field_clips::FieldClips,
     /// The animation graphs animators play (`.agraph`, ADR 0124's E12-5c).
@@ -1054,6 +1055,20 @@ struct PreviewSkin {
     beside_pose: Option<(usize, f32)>,
     beside_posed: bool,
 }
+
+/// The animation graph the live preview's model plays (ADR 0124's E12-5d-2d): its file, its
+/// play once cooked for the preview's rig, the parameter values the editor holds by slot,
+/// the seconds not ticked yet and how far the frame is between two ticks.
+struct PreviewGraph {
+    file: AssetId,
+    play: Option<crate::graphs::GraphPlay>,
+    held: Vec<(u16, f32)>,
+    left: f32,
+    alpha: f32,
+}
+
+/// The preview's graph's tick: as the characters' (64 Hz).
+const PREVIEW_TICK: f32 = 1.0 / 64.0;
 
 /// What an animator shows a frame (ADR 0124's E12-2): its clip at its moment, the clip
 /// fading out under it (at its own moment, with the first's weight), its root motion taken
@@ -1422,6 +1437,7 @@ impl Assets {
             events_dirty: false,
             event_sounds: Vec::new(),
             preview_skin: None,
+            preview_graph: None,
             fields: crate::field_clips::FieldClips::default(),
             graphs: crate::graphs::Graphs::default(),
             held_params: Vec::new(),
@@ -3777,6 +3793,125 @@ impl Assets {
         });
     }
 
+    /// The animation graph file the live preview's model plays in place of its clip (ADR
+    /// 0124's E12-5d-2d), or none: another one starts anew, at its entry with its own values.
+    /// Whether it changed (the preview is drawn again).
+    pub(crate) fn set_preview_graph(&mut self, file: Option<AssetId>) -> bool {
+        if self.preview_graph.as_ref().map(|g| g.file) == file {
+            return false;
+        }
+        self.preview_graph = file.map(|file| PreviewGraph {
+            file,
+            play: None,
+            held: Vec::new(),
+            left: 0.0,
+            alpha: 1.0,
+        });
+        if let Some(p) = self.preview_skin.as_mut() {
+            p.posed = false;
+        }
+        true
+    }
+
+    /// Whether the live preview's model plays a graph now: drawn every frame.
+    pub(crate) fn preview_graph_plays(&self) -> bool {
+        self.preview_skin.is_some()
+            && self
+                .preview_graph
+                .as_ref()
+                .is_some_and(|g| g.play.is_some())
+    }
+
+    /// Parameter `slot` of the preview's graph held at `value` (the editor's preview
+    /// values; none: back to the graph's own), from its next tick.
+    pub(crate) fn hold_preview_param(&mut self, slot: u16, value: Option<f32>) {
+        let Some(g) = self.preview_graph.as_mut() else {
+            return;
+        };
+        g.held.retain(|h| h.0 != slot);
+        if let Some(value) = value {
+            g.held.push((slot, value));
+        }
+    }
+
+    /// Where machine node `node` of the preview's graph is (as
+    /// [`engine_anim::AnimGraph::machine_now_of_node`]), once it plays.
+    pub(crate) fn preview_graph_now(&self, node: usize) -> Option<engine_anim::MachineNow<'_>> {
+        let play = self.preview_graph.as_ref()?.play.as_ref()?;
+        play.cooked.graph.machine_now_of_node(&play.state, node)
+    }
+
+    /// The preview's graph `dt` seconds on (ADR 0124's E12-5d-2d): cooked for the preview's
+    /// rig once its skin is made (again when the graph file or the rig changes), ticked at
+    /// [`PREVIEW_TICK`], posed again each frame. Nothing without a preview or a graph.
+    pub(crate) fn tick_preview_graph(&mut self, dt: f32) {
+        let (Some(g), Some(p)) = (self.preview_graph.as_mut(), self.preview_skin.as_mut()) else {
+            return;
+        };
+        let Some(rig) = p.rig.as_ref() else {
+            return;
+        };
+        let (graphs, paths, root, posing) =
+            (&mut self.graphs, &self.paths, &self.root, &mut self.posing);
+        let file = g.file;
+        graphs.read(file, || {
+            file_path(paths, AssetRef::file(file)).map(|f| root.join(f))
+        });
+        let default_table = ModelEvents::default();
+        let table = self
+            .clip_events
+            .get(&p.mesh.file)
+            .map_or(&default_table, |t| &**t);
+        let clip = |name: &str| {
+            let clips = rig.clips();
+            let k = find_clip(clips.iter().map(crate::RigClip::name), name)?;
+            Some(engine_anim::ClipInfo {
+                index: u16::try_from(k).ok()?,
+                length: clips[k].duration(),
+                once: clip_play(rig, table, k).once,
+            })
+        };
+        let motion = |k: u16| rig.motion_mode_of(clip_play(rig, table, usize::from(k)).axes);
+        let Some(cooked) = graphs.cook(file, rig, p.mesh.file, clip, motion) else {
+            g.play = None;
+            return;
+        };
+        let generation = graphs.generation();
+        match &mut g.play {
+            Some(play) if Arc::ptr_eq(&play.cooked, &cooked) => play.generation = generation,
+            _ => {
+                let mut state = engine_anim::GraphState::new(&cooked.graph);
+                // Its root motion out of its pose: the preview walks on its spot.
+                state.set_in_place(true);
+                cooked.graph.tick(&mut state, 0.0);
+                g.play = Some(crate::graphs::GraphPlay {
+                    file,
+                    cooked,
+                    state,
+                    generation,
+                });
+                g.left = 0.0;
+            }
+        }
+        let Some(play) = g.play.as_mut() else {
+            return;
+        };
+        let graph = &play.cooked.graph;
+        g.left += dt.clamp(0.0, 0.25);
+        while g.left >= PREVIEW_TICK {
+            g.left -= PREVIEW_TICK;
+            for &(slot, value) in &g.held {
+                play.state.set(slot, value);
+            }
+            graph.tick(&mut play.state, PREVIEW_TICK);
+            if play.state.wants_capture() {
+                posing.capture_graph(rig, graph, &mut play.state);
+            }
+        }
+        g.alpha = g.left / PREVIEW_TICK;
+        p.posed = false;
+    }
+
     /// The live preview's model posed at a clip's moment, or in its rest pose: set by the
     /// next sync.
     pub(crate) fn pose_preview(
@@ -3882,11 +4017,25 @@ impl Assets {
         if !p.posed
             && let (Some((id, _)), Some(rig)) = (p.instance, p.rig.as_ref())
         {
-            let look = Look {
-                in_place: p.in_place,
-                ..Look::at(p.pose)
+            // The graph the editor previews plays in place of the clip (E12-5d-2d).
+            let graph = self
+                .preview_graph
+                .as_ref()
+                .and_then(|g| Some((g.play.as_ref()?, g.alpha)));
+            let palette = match graph {
+                Some((play, alpha)) => {
+                    self.posing
+                        .palette_graph(rig, &play.cooked.graph, &play.state, alpha)
+                }
+                None => {
+                    let look = Look {
+                        in_place: p.in_place,
+                        ..Look::at(p.pose)
+                    };
+                    self.posing.palette(rig, look, [None; 2])
+                }
             };
-            skinning.set_palette(id, self.posing.palette(rig, look, [None; 2]));
+            skinning.set_palette(id, palette);
             p.posed = true;
         }
         if !p.beside_posed
