@@ -759,3 +759,24 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   - 3D models in an orthographic view, and sprites in a perspective one, wait for an ADR
     of their own;
   - the pixel-perfect camera's sub-pixel smoothing (E13-7).
+
+## As built (E13-1b-1, 2026-11-01): the editor's 2D view
+
+- **The view turns 2D** by **View: 2D** (the palette; again for 3D, the 3D camera kept as
+  it was): the editor's camera looks down −Z onto XY, orthographic
+  (`OrbitCamera::flat`, its height in world units; the camera entity's `height`, so the
+  player draws the view with the 2D pass, 3D content not in it, as decided).
+- **Navigation:** the right or middle button's drag pans (the scene follows the pointer at
+  any zoom); the wheel zooms **about the pointer by whole numbers of the art's pixels**
+  (100 %, 200 %, 300 % …, below 100 % halves; 16 art pixels a metre, a sprite's default:
+  `OrbitCamera::zoom_2d`), so pixel art never shimmers in the editor; **Ctrl+0** is 100 %;
+  F frames the selection in XY; bookmarks (Ctrl+1..9) keep 2D views as 3D ones.
+- **Picking and the gizmo** work through the same view (rays from the orthographic
+  projection; a pixel's world size the same at every depth).
+- **Tests:** the zoom's steps from 330 % (400, 200, 100, 50, 25, back to 100 %), a drag's
+  pan at any distance, no turning, framing in XY, the projection's top edge.
+- **Left (E13-1b-2 and later):** the view turning 2D by itself when the scene's main camera
+  is orthographic; the pixel grid from 800 %, the game camera's frame; snapping by art
+  pixels (Shift) and to the tile grid (Ctrl); the 2D gizmo (x and y arrows, the square,
+  the ring about z); picking sprites by their pixels and their outlines; images dropped as
+  sprites.

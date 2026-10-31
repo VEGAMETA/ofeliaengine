@@ -1793,6 +1793,15 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
   write its own. Run under `cargo run --features editor`, the editor moves into a slot
   before its window opens.
 
+## The 2D view
+
+**View: 2D** (the palette) turns the viewport into a 2D view looking at the XY plane: drag
+with the right or middle button to pan, turn the wheel to zoom about the pointer. The zoom
+goes by whole numbers of your art's pixels (100 %, 200 %, 300 % …, at 16 pixels a metre),
+so pixel art stays sharp; **Ctrl+0** shows it at 100 %. **F** frames the selection, and
+**View: 2D** again goes back to the 3D view where you left it. 3D models are not drawn in
+the 2D view.
+
 ## Building the game
 
 **Ctrl+Shift+B** (Build: Build the Game) builds the game into `builds/<name>/` in the

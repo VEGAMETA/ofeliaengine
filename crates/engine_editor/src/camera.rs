@@ -1,8 +1,12 @@
 //! The editor's viewport camera: it orbits a target point, pans, zooms, looks around and
 //! flies (`docs/research/ux/viewport-navigation.md`). Angles are in radians, distances in
 //! meters; drags come in physical pixels.
+//!
+//! In a 2D view (ADR 0125's E13-1b, [`OrbitCamera::flat`]) it looks down −Z onto XY,
+//! orthographic: dragging pans, the wheel zooms by whole numbers of the art's pixels
+//! ([`OrbitCamera::zoom_2d`]), turning does nothing.
 
-use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
+use engine_core::math::{Mat4, Vec2, Vec3, look_at, vulkan_orthographic, vulkan_perspective};
 
 /// Radians of turn per pixel of drag.
 const TURN_PER_PIXEL: f32 = 0.005;
@@ -30,7 +34,13 @@ pub struct OrbitCamera {
     pub near: f32,
     /// Far plane.
     pub far: f32,
+    /// A 2D view's height in world units (ADR 0125): orthographic, looking down −Z onto
+    /// XY; `None` in 3D.
+    pub flat: Option<f32>,
 }
+
+/// How far in front of and behind a 2D view's eye it draws.
+pub const FLAT_DEPTH: f32 = 10_000.0;
 
 impl Default for OrbitCamera {
     fn default() -> Self {
@@ -42,6 +52,7 @@ impl Default for OrbitCamera {
             fov_y: 50f32.to_radians(),
             near: 0.1,
             far: 500.0,
+            flat: None,
         }
     }
 }
@@ -49,6 +60,9 @@ impl Default for OrbitCamera {
 impl OrbitCamera {
     /// Unit vector from the target to the eye.
     fn back(&self) -> Vec3 {
+        if self.flat.is_some() {
+            return Vec3::Z;
+        }
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         Vec3::new(cp * sy, sp, cp * cy)
@@ -61,12 +75,18 @@ impl OrbitCamera {
 
     /// Orbits around the target (the eye moves, the target stays).
     pub fn orbit(&mut self, dx: f32, dy: f32) {
+        if self.flat.is_some() {
+            return;
+        }
         self.yaw -= dx * TURN_PER_PIXEL;
         self.pitch = (self.pitch + dy * TURN_PER_PIXEL).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
     /// Turns the view around the eye (the eye stays, the target moves).
     pub fn look(&mut self, dx: f32, dy: f32) {
+        if self.flat.is_some() {
+            return;
+        }
         let eye = self.eye();
         self.orbit(dx, dy);
         self.target = eye - self.back() * self.distance;
@@ -75,8 +95,10 @@ impl OrbitCamera {
     /// Moves eye and target sideways so that the scene follows the cursor at the target's
     /// depth: `viewport_height` is the viewport's height in the same pixels as the drag.
     pub fn pan(&mut self, dx: f32, dy: f32, viewport_height: f32) {
-        let meters_per_pixel =
-            2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height.max(1.0);
+        let meters_per_pixel = match self.flat {
+            Some(height) => height / viewport_height.max(1.0),
+            None => 2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height.max(1.0),
+        };
         let forward = -self.back();
         let right = forward.cross(Vec3::Y).normalize_or_zero();
         let up = right.cross(forward);
@@ -91,6 +113,32 @@ impl OrbitCamera {
         self.target += ahead * forward + side * right + Vec3::Y * up;
     }
 
+    /// A 2D view's zoom (ADR 0125's E13-1b): `pixels_per_unit` art pixels to a metre
+    /// shown at a whole number of screen pixels each (100 %, 200 %, 300 % …; below 100 %
+    /// halves), stepped by wheel `notches` from the nearest such scale, in a viewport
+    /// `viewport_height` pixels high. The scale it ends at.
+    pub fn zoom_2d(&mut self, notches: f32, viewport_height: f32, pixels_per_unit: f32) -> f32 {
+        let Some(height) = self.flat else {
+            return 1.0;
+        };
+        let scale = |h: f32| viewport_height.max(1.0) / (h * pixels_per_unit);
+        let now = scale(height);
+        // Scales as steps: 1, 2, 3 … up, 1/2, 1/4 … down (as negative steps from 1).
+        let step = if now >= 1.0 {
+            now.round()
+        } else {
+            1.0 - now.recip().log2().round()
+        };
+        let step = (step + notches.round()).clamp(-6.0, 64.0);
+        let next = if step >= 1.0 {
+            step
+        } else {
+            2f32.powf(step - 1.0)
+        };
+        self.flat = Some(viewport_height.max(1.0) / (next * pixels_per_unit));
+        next
+    }
+
     /// Moves toward the target by wheel notches (positive: closer).
     pub fn zoom(&mut self, notches: f32) {
         self.distance = (self.distance * ZOOM_PER_NOTCH.powf(notches)).clamp(0.05, 10_000.0);
@@ -100,6 +148,14 @@ impl OrbitCamera {
     /// (the same turn and elevation), from as far as fits the sphere in a viewport of
     /// `aspect` (width / height), with a margin: what framing a selection moves to.
     pub fn framing(&self, center: Vec3, radius: f32, aspect: f32) -> Self {
+        if self.flat.is_some() {
+            let height = 2.0 * radius.max(0.05) * FRAME_MARGIN / aspect.min(1.0).max(1e-3);
+            return Self {
+                target: Vec3::new(center.x, center.y, self.target.z),
+                flat: Some(height),
+                ..*self
+            };
+        }
         let tan_y = (self.fov_y * 0.5).tan();
         // The narrower of the view's two half angles.
         let half = tan_y.min(tan_y * aspect).atan();
@@ -129,8 +185,13 @@ impl OrbitCamera {
 
     /// World to clip space for a viewport of the given aspect ratio (width / height).
     pub fn clip_from_world(&self, aspect: f32) -> Mat4 {
-        vulkan_perspective(self.fov_y, aspect, self.near, self.far)
-            * look_at(self.eye(), self.target, Vec3::Y)
+        let view = look_at(self.eye(), self.target, Vec3::Y);
+        if let Some(height) = self.flat {
+            let half = Vec2::new(height * aspect, height) * 0.5;
+            return vulkan_orthographic(-half.x, half.x, -half.y, half.y, -FLAT_DEPTH, FLAT_DEPTH)
+                * view;
+        }
+        vulkan_perspective(self.fov_y, aspect, self.near, self.far) * view
     }
 }
 
@@ -140,6 +201,46 @@ mod tests {
 
     fn close(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-4
+    }
+
+    /// A 2D view (ADR 0125's E13-1b): zoom by whole numbers of the art's pixels (halves
+    /// below 100 %), pans by the drag at every depth, does not turn, frames in XY, and its
+    /// projection shows its height.
+    #[test]
+    fn a_flat_view_zooms_by_whole_pixels_and_pans() {
+        let ppu = 16.0;
+        let vh = 720.0;
+        let mut c = OrbitCamera {
+            flat: Some(vh / (3.3 * ppu)),
+            ..OrbitCamera::default()
+        };
+        // From 330 %, a notch in: 400 %, out twice: 200 %; then halves.
+        assert_eq!(c.zoom_2d(1.0, vh, ppu), 4.0);
+        assert_eq!(c.zoom_2d(-2.0, vh, ppu), 2.0);
+        assert_eq!(c.zoom_2d(-1.0, vh, ppu), 1.0);
+        assert_eq!(c.zoom_2d(-1.0, vh, ppu), 0.5);
+        assert_eq!(c.zoom_2d(-1.0, vh, ppu), 0.25);
+        assert_eq!(c.zoom_2d(2.0, vh, ppu), 1.0);
+        assert!((c.flat.unwrap() - vh / ppu).abs() < 1e-3, "100 %: 45 m shown");
+        // A drag of 72 px pans a tenth of the height, whatever the distance.
+        let before = c.target;
+        c.distance = 500.0;
+        c.pan(-72.0, 0.0, vh);
+        assert!(close(c.target - before, Vec3::new(4.5, 0.0, 0.0)), "{:?}", c.target);
+        // Turning does nothing; the eye looks down -Z.
+        let eye = c.eye();
+        c.orbit(100.0, 50.0);
+        c.look(100.0, 50.0);
+        assert!(close(c.eye(), eye));
+        assert!(close((c.target - c.eye()).normalize(), -Vec3::Z));
+        // Framing a sprite 2 m across in a wide view: centred, its height with the margin.
+        let f = c.framing(Vec3::new(3.0, 4.0, 9.0), 1.0, 16.0 / 9.0);
+        assert!(close(f.target, Vec3::new(3.0, 4.0, c.target.z)));
+        assert!((f.flat.unwrap() - 2.0 * FRAME_MARGIN).abs() < 1e-4);
+        // The projection maps the view's top edge to clip -1 (Vulkan's y down).
+        let top = c.target + Vec3::Y * c.flat.unwrap() * 0.5;
+        let clip = c.clip_from_world(16.0 / 9.0) * top.extend(1.0);
+        assert!((clip.y / clip.w + 1.0).abs() < 1e-4, "{clip:?}");
     }
 
     #[test]

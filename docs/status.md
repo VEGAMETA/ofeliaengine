@@ -883,6 +883,9 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E13-1b-1, the editor's 2D view** (#PR, ADR 0125's as-built): View: 2D (orthographic
+    onto XY, the 3D camera kept), drags pan, the wheel zooms about the pointer by whole
+    numbers of the art's pixels, Ctrl+0 is 100 %, F frames in XY.
   - **E14's project settings: research and ADR 0127** (#508, proposed, 5 questions):
     `docs/research/ux/project-settings.md` (Godot, Unity, Unreal); files per area in
     `settings/`, rebinding as player overrides, editor-baked `<scene>.navmesh` with a paths

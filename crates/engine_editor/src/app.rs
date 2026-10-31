@@ -1260,6 +1260,8 @@ struct CommandIds {
     run_build: CommandId,
     build_file: CommandId,
     zip_build: CommandId,
+    view_2d: CommandId,
+    actual_size: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1514,6 +1516,8 @@ fn commands() -> (Commands, CommandIds) {
         run_build: c.register("build.run", "Build", "Run the Last Build"),
         build_file: c.register("build.file", "Build", "Open the Build File"),
         zip_build: c.register("build.zip", "Build", "Zip the Last Build"),
+        view_2d: c.register("view.2d", "View", "2D (orthographic onto XY) or 3D"),
+        actual_size: c.register("view.actual_size", "View", "2D: the Art at 100 %"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -1821,6 +1825,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Tab", ids.enter_machine),
         ("Ctrl+Alt+G", ids.ungroup_states),
         ("Ctrl+Shift+B", ids.build_game),
+        ("Ctrl+0", ids.actual_size),
     ]
     .map(|(chord, id)| (chord, id, STATES_KEYS));
     for (chord, id, context) in global
@@ -4094,6 +4099,8 @@ struct Editor {
     /// The active reverb zone's label in the viewport: its room and priority (E11-4c).
     zone_label: String,
     camera_move: Option<(OrbitCamera, OrbitCamera, Instant)>,
+    /// The 3D view's camera while the view is 2D (ADR 0125's E13-1b): back when it is 3D.
+    orbit_3d: Option<OrbitCamera>,
     /// Shift+F: the entity the camera follows and where it last was.
     follow: Option<(Entity, Vec3)>,
     /// The camera's bookmarks, 1 to 9 (the document's; the session keeps them).
@@ -5000,6 +5007,7 @@ impl Editor {
             zone_fit: None,
             zone_label: String::new(),
             camera_move: None,
+            orbit_3d: None,
             follow: None,
             bookmarks: [None; 9],
             surface_request: None,
@@ -8852,7 +8860,11 @@ impl Editor {
                 // around and flying move the target, so they end following too.
                 self.camera_move = None;
                 let [dx, dy] = self.input.drag();
-                if self.input.held(Button::Middle) {
+                if self.orbit.flat.is_some() {
+                    // 2D: either button's drag pans.
+                    self.follow = None;
+                    self.orbit.pan(dx, dy, h * scale);
+                } else if self.input.held(Button::Middle) {
                     if self.input.shift() {
                         self.follow = None;
                         self.orbit.pan(dx, dy, h * scale);
@@ -8877,7 +8889,22 @@ impl Editor {
                 if notches != 0.0 {
                     self.camera_move = None;
                 }
-                self.orbit.zoom(notches);
+                if let Some(before) = self.orbit.flat {
+                    if notches != 0.0 {
+                        // About the pointer: the point under it stays under it.
+                        let [cx, cy] = self.input.cursor().unwrap_or([0.0, 0.0]);
+                        let off = Vec2::new(cx / scale - (x + w * 0.5), (y + h * 0.5) - cy / scale);
+                        let per = |height: f32| height / h.max(1.0);
+                        let at = self.orbit.target.truncate() + off * per(before);
+                        let zoom = self.orbit.zoom_2d(notches, h * scale, ART_PIXELS_PER_UNIT);
+                        let after = self.orbit.flat.unwrap_or(before);
+                        let target = at - off * per(after);
+                        self.orbit.target = target.extend(self.orbit.target.z);
+                        self.say(format!("Zoom {:.0} %", zoom * 100.0));
+                    }
+                } else {
+                    self.orbit.zoom(notches);
+                }
             }
             self.view_rect = Some([
                 (x * scale).round() as u32,
@@ -8894,6 +8921,24 @@ impl Editor {
         self.fit_zone(world);
         self.input.next_frame();
         let eye = self.orbit.eye();
+        if let Some(camera) = camera
+            && let Some(c) = world.get_mut::<Camera>(camera)
+        {
+            // Orthographic in 2D (ADR 0125's E13-1b), as the 2D pass draws it.
+            match self.orbit.flat {
+                Some(height) => {
+                    c.height = height;
+                    c.near = -crate::camera::FLAT_DEPTH;
+                    c.far = crate::camera::FLAT_DEPTH;
+                }
+                None => {
+                    c.height = 0.0;
+                    c.fov_y = self.orbit.fov_y;
+                    c.near = self.orbit.near;
+                    c.far = self.orbit.far;
+                }
+            }
+        }
         if let Some(camera) = camera
             && let Some(t) = world.get_mut::<Transform>(camera)
         {
@@ -19100,6 +19145,35 @@ impl Editor {
             self.keep_selection(world);
         } else if id == ids.keep_list {
             self.keep_list(world);
+        } else if id == ids.view_2d {
+            self.camera_move = None;
+            match self.orbit_3d.take() {
+                Some(back) if self.orbit.flat.is_some() => {
+                    self.orbit = back;
+                    self.say(String::from("3D view"));
+                }
+                _ => {
+                    self.orbit_3d = Some(self.orbit);
+                    let height = self.view_rect.map_or(720.0, |r| r[3] as f32);
+                    self.orbit = OrbitCamera {
+                        target: Vec3::new(self.orbit.target.x, self.orbit.target.y, 0.0),
+                        distance: 10.0,
+                        flat: Some(height / (4.0 * ART_PIXELS_PER_UNIT)),
+                        ..self.orbit
+                    };
+                    self.say(String::from(
+                        "2D view onto XY: drag pans, the wheel zooms by whole pixels, Ctrl+0 is 100 %",
+                    ));
+                }
+            }
+        } else if id == ids.actual_size {
+            if self.orbit.flat.is_some() {
+                let height = self.view_rect.map_or(720.0, |r| r[3] as f32);
+                self.orbit.flat = Some(height / ART_PIXELS_PER_UNIT);
+                self.say(String::from(
+                    "Zoom 100 %: a pixel of the art, a pixel of the screen",
+                ));
+            }
         } else if id == ids.stop {
             if self.play.is_some() {
                 self.play_request = Some(PlayRequest::Stop);
@@ -32734,6 +32808,10 @@ fn record_pso(player: &Player, root: &Path) {
         log::warn!(target: "engine_editor", "{}: {e}", path.display());
     }
 }
+
+/// The art's pixels a metre a 2D view zooms by (a sprite's default, ADR 0125): at 100 % one
+/// of them is one screen pixel.
+const ART_PIXELS_PER_UNIT: f32 = 16.0;
 
 #[cfg(test)]
 mod tests {
