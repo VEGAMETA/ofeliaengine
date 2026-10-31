@@ -471,6 +471,7 @@ dependencies = [
  "engine_app",
  "engine_assets",
  "engine_brush",
+ "engine_build",
  "engine_core",
  "engine_crash",
  "engine_ecs",

@@ -18,6 +18,8 @@ engine_shader.workspace = true
 # The player the editor runs inside of (ADR 0107): the game's world, its renderer, the
 # window.
 engine_app.workspace = true
+# The one-button build (ADR 0126's G4): the same library as `ofeliaengine build`.
+engine_build.workspace = true
 # A dropped model's outline, read from its glTF (ADR 0107 E4-3); the bake's glb read back
 # in tests.
 engine_assets.workspace = true

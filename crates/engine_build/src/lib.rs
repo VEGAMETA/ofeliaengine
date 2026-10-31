@@ -160,6 +160,42 @@ impl BuildFile {
         Ok((file, report))
     }
 
+    /// The build file of the game at `root`, made and written the first time (the game's
+    /// package name, its `start` scene, else `scenes/main.scene`, else its first scene);
+    /// whether it was made.
+    ///
+    /// # Errors
+    ///
+    /// A build file that cannot be read, a folder without a game's `Cargo.toml`, or the
+    /// new file not written.
+    pub fn open_or_make(root: &Path, start: Option<&str>) -> Result<(Self, bool), BuildError> {
+        if root.join(BUILD_FILE).is_file() {
+            return Self::load(root).map(|file| (file, false));
+        }
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| {
+            BuildError::new(format!(
+                "{}: {e} (not a game's folder?)",
+                root.join("Cargo.toml").display()
+            ))
+        })?;
+        let name = manifest
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("name").map(str::trim))
+            .and_then(|l| l.strip_prefix('='))
+            .map(|l| l.trim().trim_matches('"').to_owned())
+            .unwrap_or_else(|| String::from("game"));
+        let start = match start {
+            Some(start) => start.to_owned(),
+            None if root.join("scenes/main.scene").is_file() => String::from("scenes/main.scene"),
+            None => first_scene(root, root).unwrap_or_default(),
+        };
+        let file = Self::for_game(root, &name, &start);
+        let path = root.join(BUILD_FILE);
+        std::fs::write(&path, file.to_text(AssetId::new()))
+            .map_err(|e| BuildError::new(format!("{}: {e}", path.display())))?;
+        Ok((file, true))
+    }
+
     /// The build file of the game at `root`.
     ///
     /// # Errors
@@ -182,6 +218,12 @@ pub struct BuildError {
     pub what: String,
     /// The files named but not found, with what named them.
     pub missing: Vec<Missing>,
+}
+
+impl From<String> for BuildError {
+    fn from(what: String) -> Self {
+        Self::new(what)
+    }
 }
 
 impl BuildError {
@@ -754,6 +796,35 @@ fn sound_pack(folder: &Path, pack: &Path) -> Result<(), BuildError> {
     engine_assets::sounds::write_sound_pack(folder, pack, SOUND_LEVEL)
         .map(|_| ())
         .map_err(|e| BuildError::new(format!("{}: {e}", pack.display())))
+}
+
+/// The first `.scene` under `at`, by its path from `root`, in the folders' sorted order
+/// (dot-folders, `target` and `builds` passed over).
+fn first_scene(root: &Path, at: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(at)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            !p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.') || n == "target" || n == DEFAULT_OUTPUT)
+        })
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            if let Some(found) = first_scene(root, &path) {
+                return Some(found);
+            }
+        } else if path.extension().is_some_and(|e| e == "scene") {
+            return path
+                .strip_prefix(root)
+                .ok()
+                .map(|p| normal(&p.to_string_lossy()));
+        }
+    }
+    None
 }
 
 /// Every file under `dir` by its path from `base`, dot-files included.

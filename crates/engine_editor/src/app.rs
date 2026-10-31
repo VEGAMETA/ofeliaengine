@@ -1255,6 +1255,10 @@ struct CommandIds {
     group_states: CommandId,
     enter_machine: CommandId,
     ungroup_states: CommandId,
+    build_game: CommandId,
+    ship_game: CommandId,
+    run_build: CommandId,
+    build_file: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1504,6 +1508,10 @@ fn commands() -> (Commands, CommandIds) {
             "Animation",
             "Take the Machine Apart",
         ),
+        build_game: c.register("build.build", "Build", "Build the Game"),
+        ship_game: c.register("build.ship", "Build", "Ship the Game (shipping profile)"),
+        run_build: c.register("build.run", "Build", "Run the Last Build"),
+        build_file: c.register("build.file", "Build", "Open the Build File"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -1810,6 +1818,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+G", ids.group_states),
         ("Tab", ids.enter_machine),
         ("Ctrl+Alt+G", ids.ungroup_states),
+        ("Ctrl+Shift+B", ids.build_game),
     ]
     .map(|(chord, id)| (chord, id, STATES_KEYS));
     for (chord, id, context) in global
@@ -3805,7 +3814,10 @@ struct Editor {
     loading: usize,
     /// When each kind of background work was first seen running (the Tasks panel): the
     /// game's build, assets loading, textures compressing, thumbnails, the navigation.
-    tasks_since: [Option<Instant>; 5],
+    tasks_since: [Option<Instant>; 6],
+    /// The game's build under way (ADR 0126's G4), and the last one's program.
+    game_build: Option<crate::game_build::GameBuild>,
+    last_build: Option<PathBuf>,
     /// The Tasks panel's rows (name, how far, how long) and its tab's label, made with the
     /// frame.
     task_rows: Vec<(&'static str, String, String)>,
@@ -4836,7 +4848,9 @@ impl Editor {
             changed_assets: Vec::new(),
             compressing: 0,
             loading: 0,
-            tasks_since: [None; 5],
+            tasks_since: [None; 6],
+            game_build: None,
+            last_build: None,
             task_rows: Vec::new(),
             tasks_label: String::new(),
             history_shown: false,
@@ -5510,6 +5524,8 @@ impl Editor {
         if self.history_shown {
             self.collect_history();
         }
+        // The game's build (ADR 0126's G4): its lines to the Output, its outcome said.
+        self.poll_game_build();
         // The Tasks (E6-3): the background work under way, its tab counting it.
         self.collect_tasks();
         self.tasks_label.clear();
@@ -12584,6 +12600,91 @@ impl Editor {
         }
     }
 
+    /// The game's build commands (ADR 0126's G4): Build and Ship start one in the
+    /// background (one at a time; the scenes as saved); Run starts the last build's
+    /// program; Open the Build File shows `game.build` in a code tab, made first if need be.
+    fn build_command(&mut self, world: &mut World, id: CommandId) {
+        let ids = self.ids;
+        if id == ids.run_build {
+            let Some(program) = self.last_build.clone() else {
+                self.say(String::from(
+                    "No build yet: Build the Game (Ctrl+Shift+B) first",
+                ));
+                return;
+            };
+            let started = std::process::Command::new(&program)
+                .current_dir(program.parent().unwrap_or(&self.root))
+                .spawn();
+            match started {
+                Ok(_) => self.say(format!("Running {}", program.display())),
+                Err(e) => self.say(format!("{}: {e}", program.display())),
+            }
+            return;
+        }
+        let start = self.scene_path.as_ref().map(|p| {
+            p.strip_prefix(&self.root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        });
+        if id == ids.build_file {
+            match engine_build::BuildFile::open_or_make(&self.root, start.as_deref()) {
+                Ok((_, made)) => {
+                    if made {
+                        self.say(format!("Made {}", engine_build::BUILD_FILE));
+                    }
+                    let path = self.root.join(engine_build::BUILD_FILE);
+                    self.open_script(world, &path, None);
+                }
+                Err(e) => self.say(format!("{e}")),
+            }
+            return;
+        }
+        if self.game_build.is_some() {
+            self.say(String::from(
+                "A build is under way (the Tasks panel shows it)",
+            ));
+            return;
+        }
+        let kind = if id == ids.ship_game {
+            engine_build::Kind::Ship
+        } else {
+            engine_build::Kind::Build
+        };
+        let shaders = Path::new(engine_render::forward::ENGINE_SHADER_DIR);
+        match crate::game_build::GameBuild::start(&self.root, kind, start.as_deref(), shaders) {
+            Ok((build, made)) => {
+                self.game_build = Some(build);
+                self.say(if made {
+                    format!(
+                        "Building the game; made {} (Build: Open the Build File)",
+                        engine_build::BUILD_FILE
+                    )
+                } else {
+                    String::from(
+                        "Building the game: the Tasks panel shows it, the Output its lines",
+                    )
+                });
+            }
+            Err(e) => self.say(format!("Not built: {e}")),
+        }
+    }
+
+    /// A build under way polled: its outcome said and logged once it is done.
+    fn poll_game_build(&mut self) {
+        let Some(build) = &mut self.game_build else {
+            return;
+        };
+        if let crate::game_build::Polled::Done(result) = build.poll() {
+            self.game_build = None;
+            let (said, program) = crate::game_build::report(&result);
+            if program.is_some() {
+                self.last_build = program;
+            }
+            self.say(said);
+        }
+    }
+
     /// The background work under way, as the Tasks panel lists it (E6-3): each kind with
     /// how far it is and how long it has run since first seen.
     fn collect_tasks(&mut self) {
@@ -12594,7 +12695,14 @@ impl Editor {
         };
         let thumbnails = self.thumbnails.pending();
         let left = |n: usize| (n > 0).then(|| format!("{n} left"));
-        let kinds: [(&'static str, Option<String>); 5] = [
+        let game_build = self.game_build.as_ref().map(|b| {
+            let what = match b.kind {
+                engine_build::Kind::Build => "Build",
+                engine_build::Kind::Ship => "Ship",
+            };
+            (b.since, format!("{what}: {}", b.step))
+        });
+        let kinds: [(&'static str, Option<String>); 6] = [
             ("Building the game's code", building.map(|_| String::new())),
             ("Loading assets", left(self.loading)),
             ("Compressing textures", left(self.compressing)),
@@ -12603,6 +12711,10 @@ impl Editor {
                 "Baking the navigation",
                 self.nav_job.is_some().then(String::new),
             ),
+            (
+                "Building the game's folder",
+                game_build.as_ref().map(|(_, step)| step.clone()),
+            ),
         ];
         self.task_rows.clear();
         for (k, (name, detail)) in kinds.into_iter().enumerate() {
@@ -12610,10 +12722,10 @@ impl Editor {
                 self.tasks_since[k] = None;
                 continue;
             };
-            let since = *self.tasks_since[k].get_or_insert(if k == 0 {
-                building.unwrap_or(now)
-            } else {
-                now
+            let since = *self.tasks_since[k].get_or_insert(match k {
+                0 => building.unwrap_or(now),
+                5 => game_build.as_ref().map_or(now, |(since, _)| *since),
+                _ => now,
             });
             let seconds = now.duration_since(since).as_secs();
             let elapsed = if seconds < 60 {
@@ -18455,6 +18567,11 @@ impl Editor {
     fn run(&mut self, world: &mut World, id: CommandId) {
         self.commands.ran(id);
         let ids = self.ids;
+        // The game's build (ADR 0126's G4), from any tab.
+        if [ids.build_game, ids.ship_game, ids.run_build, ids.build_file].contains(&id) {
+            self.build_command(world, id);
+            return;
+        }
         // An animation graph's tab (ADR 0124 E12-5d-1): as a material graph's, Space adding
         // a state; the material graph's own keys (copies, frames, functions) said to be its.
         if let Some(g) = self.anim_graph_shown() {
@@ -33225,7 +33342,7 @@ mod tests {
         ed.build_state = BuildState::Idle;
         ed.update(&mut world);
         assert!(ed.task_rows.is_empty());
-        assert_eq!(ed.tasks_since, [None; 5]);
+        assert_eq!(ed.tasks_since, [None; 6]);
     }
 
     #[test]
