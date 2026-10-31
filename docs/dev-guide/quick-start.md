@@ -152,6 +152,8 @@ PlayerSettings { pack: Some("level.pack".into()), ..settings }
 
 ## 8. Build it
 
+In the editor: **Ctrl+Shift+B**. From a terminal:
+
 ```text
 ofeliaengine build            a folder players run: builds/<name>/
 ofeliaengine build --ship     the same, built for shipping (slower to build, faster to run)

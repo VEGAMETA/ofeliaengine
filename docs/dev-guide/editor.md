@@ -1793,6 +1793,16 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
   write its own. Run under `cargo run --features editor`, the editor moves into a slot
   before its window opens.
 
+## Building the game
+
+**Ctrl+Shift+B** (Build: Build the Game) builds the game into `builds/<name>/` in the
+background, as `ofeliaengine build` does: the Tasks panel shows its step, the Output its
+lines (an error's file and line is a link), the status line says when it is done.
+**Build: Ship the Game** builds for shipping (slower to build, faster to run), **Build: Run
+the Last Build** starts what it built, **Build: Open the Build File** opens `game.build`
+(the scenes, the folders always in, the kind, where builds go). The build reads your files
+as saved: save first.
+
 ## Coming next
 
 | Phase | What |

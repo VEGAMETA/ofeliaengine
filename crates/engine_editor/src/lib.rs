@@ -22,6 +22,7 @@ mod drop;
 pub mod expr;
 mod faces;
 mod find;
+mod game_build;
 mod gizmo;
 mod graph;
 mod handles;

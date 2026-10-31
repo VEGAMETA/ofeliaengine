@@ -883,6 +883,11 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E14 G4, the editor's Build** (#PR, ADR 0126's as-built G4; G3c moved to the
+    navigation settings: a scene file's game has no navmesh reader yet): Build the Game
+    (Ctrl+Shift+B), Ship the Game, Run the Last Build, Open the Build File; the build on its
+    own thread through `engine_build`, its step in the Tasks panel, cargo's lines and
+    missing files in the Output as links; `BuildFile::open_or_make` shared with the CLI.
   - **E14 G3b, images left out of a build** (#503, ADR 0126's as-built G3b, team decision:
     the models stay glTF until a measurement says otherwise): `derived.pack` records each
     image's content by its path (`source` entries, `texture_key_of`, `packed_texture`), the

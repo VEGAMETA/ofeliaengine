@@ -83,7 +83,7 @@
 |---|---|
 | **G1** | the build file, the dependency walk, `ofeliaengine build`: the game built, its scenes and the assets they reach in the folder as they are now read (a runnable build, option 2's shape), notices, `plugins/`; the run-from-the-folder test |
 | **G2** | material types and graphs to SPIR-V at build time, the player loading them (no Slang at run time) |
-| **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs. In three: **G3a** the derived data (compressed textures, cooked colliders) in one read-only pack beside the sources; **G3b** the images the pack stands in for left out (the models stay glTF, below); **G3c** navigation baked |
+| **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs. In three: **G3a** the derived data (compressed textures, cooked colliders) in one read-only pack beside the sources; **G3b** the images the pack stands in for left out (the models stay glTF, below); **G3c** navigation baked (moved to E14's navigation settings: below) |
 | **G4** | the editor's Build: the settings section, the task, errors at their causes, Run the Build |
 | **G5** | scripts as Luau bytecode, the PSO warm-up list, a size report, an optional zip |
 
@@ -233,6 +233,37 @@ colliders again on every run. G3a carries what the editor's cache would hold.
 - **Tests:** the material's image left out and found by its path under the pack's folder
   (for its use only), the sprite's kept; a built game's player drawing a model whose image
   file was removed, its texture compressed from the pack.
+
+## G3c moved (2026-11-01)
+
+A scene file's game has no navigation mesh to bake yet: the player reads one only from a
+cooked scene pack (`Player::load_navigation`, ADR 0103), scripts have no paths API, and the
+editor bakes from the blockout only to draw it (View: Navigation). Baking at build time
+would have no reader. It moves to E14's navigation settings, which add the agent's settings
+to the project, the bake the editor's Play and a built game share (at build time into the
+derived data, at load in the editor), and the paths API.
+
+## As built (G4, 2026-11-01): the editor's Build
+
+- **Commands** (the palette's Build group): **Build the Game** (Ctrl+Shift+B), **Ship the
+  Game** (the shipping profile), **Run the Last Build**, **Open the Build File**
+  (`game.build` in a code tab, made from the open scene the first time, as a first Build
+  makes it). They work from every tab.
+- **In the background** (`engine_editor::game_build`): `engine_build::build` on a thread
+  of its own, one build at a time; the Tasks panel's row "Building the game's folder" says
+  its step (compiling, compressing textures and cooking colliders, compiling material types,
+  writing n/m) and how long it has run.
+- **Errors at their causes:** cargo's lines go to the Output through the log (target
+  `build`): errors and warnings at their levels, their `--> file:line:col` rows links to the
+  place; the crates compiled as detail. A file named and missing is a row naming the file
+  that names it (a link to it). The outcome is said in the status line and the Output.
+- **One code path:** the build file is made by `BuildFile::open_or_make`, now the
+  library's, which `ofeliaengine build` calls too.
+- **Not done:** an inspector section for the build file's fields (the file is edited in its
+  code tab for now); the build reads the files as saved, so a scene's unsaved changes are
+  not in it; the build's process is not lowered in priority.
+- **Tests:** cargo's lines at their levels; a folder that is not a game's said at once with
+  no file made; a missing file's report.
 
 ## Questions for the team
 

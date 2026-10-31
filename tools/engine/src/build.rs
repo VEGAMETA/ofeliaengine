@@ -53,60 +53,14 @@ pub(crate) fn parse_build(args: impl Iterator<Item = String>) -> Result<BuildArg
 
 /// The game's build file, made the first time (said on stderr).
 fn build_file(dir: &Path) -> Result<BuildFile, String> {
-    if dir.join(BUILD_FILE).is_file() {
-        return BuildFile::load(dir).map_err(|e| e.to_string());
+    let (file, made) = BuildFile::open_or_make(dir, None).map_err(|e| e.to_string())?;
+    if made {
+        eprintln!(
+            "made {BUILD_FILE}: {}, starting in {}",
+            file.name, file.start
+        );
     }
-    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|e| {
-        format!(
-            "{}: {e} (not a game's folder?)",
-            dir.join("Cargo.toml").display()
-        )
-    })?;
-    let name = manifest
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("name").map(str::trim))
-        .and_then(|l| l.strip_prefix('='))
-        .map(|l| l.trim().trim_matches('"').to_owned())
-        .unwrap_or_else(|| String::from("game"));
-    let start = if dir.join("scenes/main.scene").is_file() {
-        String::from("scenes/main.scene")
-    } else {
-        first_scene(dir, dir).unwrap_or_default()
-    };
-    let file = BuildFile::for_game(dir, &name, &start);
-    let path = dir.join(BUILD_FILE);
-    std::fs::write(&path, file.to_text(engine_scene::AssetId::new()))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    eprintln!("made {BUILD_FILE}: {name}, starting in {start}");
     Ok(file)
-}
-
-/// The first `.scene` under `at`, by its path from `root`, in the folders' sorted order.
-fn first_scene(root: &Path, at: &Path) -> Option<String> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(at)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            !p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with('.') || n == "target" || n == "builds")
-        })
-        .collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            if let Some(found) = first_scene(root, &path) {
-                return Some(found);
-            }
-        } else if path.extension().is_some_and(|e| e == "scene") {
-            return path
-                .strip_prefix(root)
-                .ok()
-                .map(|p| p.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    None
 }
 
 /// `text` as a JSON string.
