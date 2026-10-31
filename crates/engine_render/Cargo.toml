@@ -34,6 +34,6 @@ harness = false
 # glTF scenes for examples/scene_bench.rs.
 engine_assets.workspace = true
 # zstd into staging memory in examples/staging_bench.rs (ADR 0057).
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 # The deliberate GPU fault test writes its report to a temporary directory (ADR 0061).
 engine_log.workspace = true

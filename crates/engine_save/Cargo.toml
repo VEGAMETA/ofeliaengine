@@ -20,4 +20,4 @@ engine_reflect.workspace = true
 # `SceneId`: the identity of the level's and authored entities (ADR 0029).
 engine_scene.workspace = true
 # The body's compression: the zstd library the packs use (BSD-3-Clause, ADR 0056).
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
