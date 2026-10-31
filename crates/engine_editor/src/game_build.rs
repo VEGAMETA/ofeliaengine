@@ -63,6 +63,7 @@ impl GameBuild {
                     kind: Some(kind),
                     output: None,
                     engine_shaders: Some(shaders),
+                    zip: false,
                 };
                 let result = engine_build::build(&root, &file, &options, |step| {
                     let event = match step {
@@ -154,6 +155,7 @@ pub(crate) fn report(result: &Result<Built, BuildError>) -> (String, Option<Path
                 (built.bytes + built.derived.bytes) as f64 / 1e6
             );
             log::info!(target: "build", "{said}");
+            log::info!(target: "build", "size report: {}", built.report.display());
             (said, Some(built.program.clone()))
         }
         Err(e) => {
