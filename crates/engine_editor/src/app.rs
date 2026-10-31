@@ -2204,6 +2204,28 @@ struct ShownModel {
     floor_clip: usize,
 }
 
+/// The shown animation graph's character in its canvas's corner (ADR 0124's E12-5d-2d-2):
+/// the graph, where its model came from (the graph's `preview` model file, else a character
+/// playing it), that model's mesh and material, the turn a drag gave it, its newest pixels.
+struct GraphModel {
+    graph: AssetId,
+    from: GraphModelFrom,
+    mesh: AssetRef,
+    material: AssetRef,
+    turn: [f32; 2],
+    grab: Option<[f32; 2]>,
+    pixels: Vec<u8>,
+    upload: bool,
+    shown: bool,
+}
+
+/// Where the corner preview's model came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphModelFrom {
+    File(AssetId),
+    Entity(Entity),
+}
+
 /// A section of the picked bus after its Bus section (E11-2b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MixerPart {
@@ -3740,6 +3762,9 @@ struct Editor {
     model_checked: Option<AssetId>,
     model_given: bool,
     model_texture: Option<u32>,
+    /// The shown animation graph's character in its canvas's corner (E12-5d-2d-2): the live
+    /// model preview while it shows (the dock's waits), drawn into the model's texture.
+    graph_model: Option<GraphModel>,
     mixer_muted: Vec<String>,
     mixer_soloed: Vec<String>,
     monitor: bool,
@@ -4788,6 +4813,7 @@ impl Editor {
             model_checked: None,
             model_given: false,
             model_texture: None,
+            graph_model: None,
             mixer_muted: Vec::new(),
             mixer_soloed: Vec::new(),
             monitor: false,
@@ -7026,15 +7052,22 @@ impl Editor {
                     layers: &anim_layers,
                     layer: shown_layer,
                     crumbs: &anim_crumbs,
-                    preview: self
-                        .graph_preview
-                        .as_ref()
-                        .filter(|p| p.graph == d.id && p.shown)
-                        .and(self.preview_texture)
-                        .map(|texture| engine_ui::UiImage {
-                            texture,
-                            uv: [0.0, 0.0, 1.0, 1.0],
-                        }),
+                    preview: if d.anim.is_some() {
+                        // Its character playing it (E12-5d-2d-2).
+                        self.graph_model
+                            .as_ref()
+                            .filter(|m| m.graph == d.id && m.shown)
+                            .and(self.model_texture)
+                    } else {
+                        self.graph_preview
+                            .as_ref()
+                            .filter(|p| p.graph == d.id && p.shown)
+                            .and(self.preview_texture)
+                    }
+                    .map(|texture| engine_ui::UiImage {
+                        texture,
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                    }),
                 });
         // The shown script's lines in view, their numbers, its selections and carets.
         let shown = &self.code_shown;
@@ -15174,6 +15207,9 @@ impl Editor {
             }
         }
         let cursor = self.input.cursor().map(|[cx, cy]| [cx / scale, cy / scale]);
+        if self.graphs[g].anim.is_some() {
+            self.turn_graph_model(response.graph_preview, cursor);
+        }
         let free = self.command_palette.is_none()
             && !self.add_open
             && !self.view_menu_open
@@ -15590,6 +15626,139 @@ impl Editor {
                 "Grouped: {redirected} transition{s} into its states now come in at {entry}, \
                  its entry (Tab enters it)"
             ));
+        }
+    }
+
+    /// The shown animation graph's character in its canvas's corner (ADR 0124's E12-5d-2d-2),
+    /// outside Play: the graph's `preview` model file, else a character playing it (the
+    /// active one, else the first in the scene), drawn by the live model preview playing
+    /// the graph as its tab holds it (on its spot, turned by a drag), the parameters' preview
+    /// values held and their triggers fired; let go when no graph shows. A steady frame
+    /// allocates nothing.
+    fn graph_model_frame(&mut self, player: &mut Player) {
+        let shown = self.anim_graph_shown().filter(|_| self.play.is_none());
+        let Some(g) = shown else {
+            if self.graph_model.take().is_some() {
+                player.preview_graph(None);
+                player.set_model_preview(None);
+            }
+            for doc in &mut self.graphs {
+                if let Some(anim) = doc.anim.as_deref_mut() {
+                    anim.previewing = false;
+                }
+            }
+            return;
+        };
+        let id = self.graphs[g].id;
+        let file = self.graphs[g]
+            .anim()
+            .map(|a| a.file.preview)
+            .filter(|r| *r != AssetRef::NONE);
+        let from = match file {
+            Some(r) => Some(GraphModelFrom::File(r.file)),
+            None => {
+                let world = player.world();
+                let plays = |e: Entity| {
+                    world
+                        .get::<engine_runtime::Animator>(e)
+                        .is_some_and(|a| a.graph.file == id)
+                };
+                self.selection
+                    .last()
+                    .copied()
+                    .filter(|&e| plays(e))
+                    .or_else(|| {
+                        self.graph_model
+                            .as_ref()
+                            .and_then(|m| match m.from {
+                                GraphModelFrom::Entity(e) => Some(e),
+                                GraphModelFrom::File(_) => None,
+                            })
+                            .filter(|&e| plays(e))
+                    })
+                    .or_else(|| player.skinned_models().find(|&e| plays(e)))
+                    .map(GraphModelFrom::Entity)
+            }
+        };
+        let same = self
+            .graph_model
+            .as_ref()
+            .is_some_and(|m| m.graph == id && Some(m.from) == from);
+        if !same {
+            let parts = match from {
+                Some(GraphModelFrom::File(f)) => self
+                    .preview_parts(Subject::File(f))
+                    .and_then(|p| p.first().map(|&(mesh, material, _)| (mesh, material))),
+                Some(GraphModelFrom::Entity(e)) => {
+                    player.world().get::<Model>(e).map(|m| (m.mesh, m.material))
+                }
+                None => None,
+            };
+            let turn = self.graph_model.as_ref().map_or([0.0; 2], |m| m.turn);
+            self.graph_model = from.zip(parts).map(|(from, (mesh, material))| GraphModel {
+                graph: id,
+                from,
+                mesh,
+                material,
+                turn,
+                grab: None,
+                pixels: Vec::new(),
+                upload: false,
+                shown: false,
+            });
+        }
+        let Some(m) = self.graph_model.as_mut() else {
+            player.preview_graph(None);
+            player.set_model_preview(None);
+            if let Some(anim) = self.graphs[g].anim.as_deref_mut() {
+                anim.previewing = false;
+            }
+            return;
+        };
+        player.set_model_preview(Some(engine_app::ModelPreview {
+            mesh: m.mesh,
+            material: m.material,
+            turn: m.turn,
+            pose: None,
+            floor: None,
+            beside: None,
+        }));
+        player.preview_graph(Some(id));
+        if player.take_model_preview(&mut m.pixels) {
+            m.upload = true;
+        }
+        if let Some(anim) = self.graphs[g].anim.as_deref_mut() {
+            anim.previewing = true;
+            for (k, value) in anim.preview.iter().enumerate() {
+                player.hold_preview_param(k as u16, *value);
+            }
+            for slot in anim.fired.drain(..) {
+                player.fire_preview_param(slot);
+            }
+        }
+    }
+
+    /// A drag on the shown animation graph's corner preview (E12-5d-2d-2), as on the model
+    /// and material previews: sideways about the vertical, up and down about the sideways
+    /// axis.
+    fn turn_graph_model(&mut self, preview: u64, cursor: Option<[f32; 2]>) {
+        let Some(m) = self.graph_model.as_mut() else {
+            return;
+        };
+        if !self.input.held(Button::Left) {
+            m.grab = None;
+            return;
+        }
+        if m.grab.is_none() {
+            if self.input.pressed(Button::Left) && preview != 0 && self.ui.hovers(preview) {
+                m.grab = cursor;
+            }
+            return;
+        }
+        if let (Some([gx, gy]), Some([x, y])) = (m.grab, cursor) {
+            m.turn[0] += (x - gx) * 0.01;
+            m.turn[1] = (m.turn[1] + (y - gy) * 0.01).clamp(-1.5, 1.5);
+            m.grab = Some([x, y]);
         }
     }
 
@@ -20131,10 +20300,12 @@ impl Editor {
     /// Clips' preview from its pick on (its file's outline read once), let go once another
     /// asset or none is picked. Only a skinned one gets Clips (once the player made its rig).
     fn model_preview_frame(&mut self) {
+        // The live preview is the graph's character's while one shows (E12-5d-2d-2).
         let picked = self
             .inspected
             .as_ref()
             .filter(|a| a.kind == engine_scene::AssetKind::Model)
+            .filter(|_| self.anim_graph_shown().is_none() || self.play.is_some())
             .map(|a| a.id);
         let Some(file) = picked else {
             self.model_checked = None;
@@ -23353,6 +23524,12 @@ impl Editor {
         };
         if !playing {
             self.anim_watched = None;
+            // The corner preview's machine (E12-5d-2d-2).
+            if let Some(node) = anim.machine_node_index()
+                && let Some(now) = player.preview_graph_now(node)
+            {
+                anim.live.set("the preview", &now);
+            }
             return;
         }
         let world = player.world();
@@ -23508,6 +23685,7 @@ impl Editor {
             }
             None => {}
         }
+        self.graph_model_frame(player);
         // Whose clips the inspector shows: the picked model file's, else the active
         // character's, once its rig is made.
         let rigged = match &self.shown_model {
@@ -29129,6 +29307,26 @@ impl<G> EditorGame<G> {
         self.shared.borrow().anim_status.clone()
     }
 
+    /// The shown animation graph's corner preview (ADR 0124's E12-5d-2d-2): once drawn, how
+    /// many of its pixels its character covers. For tests.
+    pub fn graph_corner(&self) -> Option<usize> {
+        let shared = self.shared.borrow();
+        let m = shared.graph_model.as_ref().filter(|m| m.shown)?;
+        Some(m.pixels.chunks_exact(4).filter(|c| c[3] > 128).count())
+    }
+
+    /// Parameter `k` (in their names' order) of the shown animation graph set to `value` in
+    /// its corner preview (E12-5d-2d-2), as its preview row does. For tests.
+    pub fn set_graph_preview_param(&mut self, k: usize, value: f32) {
+        let mut shared = self.shared.borrow_mut();
+        if let Some(anim) = shared
+            .anim_graph_shown()
+            .and_then(|g| shared.graphs[g].anim.as_deref_mut())
+        {
+            anim.set_preview(k, Some(value));
+        }
+    }
+
     /// The shown animation graph's shown layer's mask as its section lists it (ADR 0124's
     /// E12-5d-2b): each joint's name and weight; empty until a character playing the graph
     /// gives its skeleton. For tests.
@@ -32289,6 +32487,15 @@ impl Overlay for EditorOverlay {
                 self.model
                     .upload(pass.fg, pass.ring, &m.pixels)
                     .map_err(AppError::at("the model's preview"))?;
+                m.upload = false;
+                m.shown = true;
+            }
+            // The shown animation graph's character, into the same texture (E12-5d-2d-2: one
+            // live preview at a time).
+            if let Some(m) = editor.graph_model.as_mut().filter(|m| m.upload) {
+                self.model
+                    .upload(pass.fg, pass.ring, &m.pixels)
+                    .map_err(AppError::at("the graph's character"))?;
                 m.upload = false;
                 m.shown = true;
             }

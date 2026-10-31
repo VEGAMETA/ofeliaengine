@@ -1063,6 +1063,8 @@ struct PreviewGraph {
     file: AssetId,
     play: Option<crate::graphs::GraphPlay>,
     held: Vec<(u16, f32)>,
+    /// Triggers fired, set at its next tick (E12-5d-2d-2).
+    fired: Vec<u16>,
     left: f32,
     alpha: f32,
 }
@@ -3804,6 +3806,7 @@ impl Assets {
             file,
             play: None,
             held: Vec::new(),
+            fired: Vec::new(),
             left: 0.0,
             alpha: 1.0,
         });
@@ -3811,6 +3814,14 @@ impl Assets {
             p.posed = false;
         }
         true
+    }
+
+    /// Trigger `slot` of the preview's graph fired: set at its next tick, used up by the
+    /// transition it lets go (E12-5d-2d-2).
+    pub(crate) fn fire_preview_param(&mut self, slot: u16) {
+        if let Some(g) = self.preview_graph.as_mut() {
+            g.fired.push(slot);
+        }
     }
 
     /// Whether the live preview's model plays a graph now: drawn every frame.
@@ -3902,6 +3913,9 @@ impl Assets {
             g.left -= PREVIEW_TICK;
             for &(slot, value) in &g.held {
                 play.state.set(slot, value);
+            }
+            for slot in g.fired.drain(..) {
+                play.state.set(slot, 1.0);
             }
             graph.tick(&mut play.state, PREVIEW_TICK);
             if play.state.wants_capture() {
