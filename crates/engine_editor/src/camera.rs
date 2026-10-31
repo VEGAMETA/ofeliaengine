@@ -149,7 +149,7 @@ impl OrbitCamera {
     /// `aspect` (width / height), with a margin: what framing a selection moves to.
     pub fn framing(&self, center: Vec3, radius: f32, aspect: f32) -> Self {
         if self.flat.is_some() {
-            let height = 2.0 * radius.max(0.05) * FRAME_MARGIN / aspect.min(1.0).max(1e-3);
+            let height = 2.0 * radius.max(0.05) * FRAME_MARGIN / aspect.clamp(1e-3, 1.0);
             return Self {
                 target: Vec3::new(center.x, center.y, self.target.z),
                 flat: Some(height),
@@ -221,12 +221,19 @@ mod tests {
         assert_eq!(c.zoom_2d(-1.0, vh, ppu), 0.5);
         assert_eq!(c.zoom_2d(-1.0, vh, ppu), 0.25);
         assert_eq!(c.zoom_2d(2.0, vh, ppu), 1.0);
-        assert!((c.flat.unwrap() - vh / ppu).abs() < 1e-3, "100 %: 45 m shown");
+        assert!(
+            (c.flat.unwrap() - vh / ppu).abs() < 1e-3,
+            "100 %: 45 m shown"
+        );
         // A drag of 72 px pans a tenth of the height, whatever the distance.
         let before = c.target;
         c.distance = 500.0;
         c.pan(-72.0, 0.0, vh);
-        assert!(close(c.target - before, Vec3::new(4.5, 0.0, 0.0)), "{:?}", c.target);
+        assert!(
+            close(c.target - before, Vec3::new(4.5, 0.0, 0.0)),
+            "{:?}",
+            c.target
+        );
         // Turning does nothing; the eye looks down -Z.
         let eye = c.eye();
         c.orbit(100.0, 50.0);
