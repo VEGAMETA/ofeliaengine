@@ -883,7 +883,7 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
-  - **E14's project settings: research and ADR 0127** (#PR, proposed, 5 questions):
+  - **E14's project settings: research and ADR 0127** (#508, proposed, 5 questions):
     `docs/research/ux/project-settings.md` (Godot, Unity, Unreal); files per area in
     `settings/`, rebinding as player overrides, editor-baked `<scene>.navmesh` with a paths
     API, named collision layers with a matrix, lighting per scene; phases S1–S6. Waiting
