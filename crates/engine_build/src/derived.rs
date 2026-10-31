@@ -13,6 +13,11 @@
 //! The imports run through the editor's own cache (`.ofelia/ddc`), so what the editor has
 //! made is not made again; the entries they read or stored are packed. A pack holding the
 //! same entries (their keys hash their sources and settings) is kept.
+//!
+//! - **Images left out** (G3b): the pack records each compressed image's content by its
+//!   path (`engine_assets::source_key`), so the player finds its texture without it; the
+//!   images models and material files use are then left out of the build
+//!   ([`Derived::left_out`]). Sprites' images and those kept uncompressed go in.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -29,7 +34,7 @@ use crate::{BuildError, Plan, extension};
 pub const EDITOR_CACHE: &str = ".ofelia/ddc";
 
 /// What went into a derived data pack.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Derived {
     /// Textures (an image for one use).
     pub textures: usize,
@@ -43,6 +48,9 @@ pub struct Derived {
     pub written: bool,
     /// Seconds it took.
     pub seconds: f64,
+    /// The images (by their paths under the game's folder) the pack stands in for: left
+    /// out of the build.
+    pub left_out: BTreeSet<String>,
 }
 
 /// Whether `path` names an image file the player decodes.
@@ -84,6 +92,17 @@ pub fn derived_pack(
             std::fs::read(path).map_err(|e| BuildError::new(format!("{}: {e}", path.display())))?;
         import_texture(&bytes, usage, Some(&cache), jobs)
             .map_err(|e| BuildError::new(format!("{}: {e}", path.display())))?;
+        // Its content by its path: its texture found without it.
+        if let Some(under) = engine_assets::path_under(root, path) {
+            let hash = engine_core::hash::content_hash128(&bytes);
+            cache
+                .put(
+                    engine_assets::source_key(&under),
+                    engine_assets::SOURCE_KIND,
+                    &hash.to_le_bytes(),
+                )
+                .map_err(|e| BuildError::new(format!("{}: {e}", path.display())))?;
+        }
         derived.textures += 1;
         Ok::<(), BuildError>(())
     };
@@ -152,6 +171,13 @@ pub fn derived_pack(
             }
         }
     }
+    // Those the models and materials use, compressed: the pack stands in for them.
+    derived.left_out = used_images
+        .iter()
+        .filter(|path| !uncompressed(path))
+        .filter_map(|path| engine_assets::path_under(root, path))
+        .filter(|path| plan.files.contains(path))
+        .collect();
     // The other images (sprites): drawn as color.
     for file in plan.files.iter().filter(|f| is_image(f)) {
         let path = root.join(file);
@@ -234,7 +260,7 @@ mod tests {
         let derived = derived_pack(&root, &plan, &cache, &pack, None).unwrap();
         assert_eq!(
             (derived.textures, derived.entries, derived.written),
-            (2, 2, true),
+            (2, 4, true),
             "the hero as color, the bumps as a normal map; the pixel art left out"
         );
         let read = DerivedDataCache::open_pack(&pack).unwrap();
@@ -244,10 +270,21 @@ mod tests {
         assert!(engine_assets::cached_texture(&read, &hero, TextureUsage::Color).is_some());
         assert!(engine_assets::cached_texture(&read, &bumps, TextureUsage::Normal).is_some());
         assert!(engine_assets::cached_texture(&read, &bumps, TextureUsage::Color).is_none());
+        // The material's image is left out, found by its path; the sprite's goes in.
+        assert_eq!(
+            derived.left_out.iter().collect::<Vec<_>>(),
+            ["sprites/bumps.png"]
+        );
+        let moved = root.join("out/sprites/bumps.png");
+        assert!(
+            read.packed_texture(&moved, TextureUsage::Normal).is_some(),
+            "by its path under the pack's folder"
+        );
+        assert!(read.packed_texture(&moved, TextureUsage::Color).is_none());
         assert!(read.put(1, "texture", b"no").is_err(), "read-only");
         // Again: every entry from the editor's cache, the pack kept.
         let again = derived_pack(&root, &plan, &cache, &pack, None).unwrap();
-        assert_eq!((again.entries, again.written), (2, false));
+        assert_eq!((again.entries, again.written), (4, false));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

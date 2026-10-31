@@ -126,7 +126,8 @@ Sponza, counted from the first frame:
 `ofeliaengine build` compresses the textures your scenes use and cooks your models'
 colliders into `data/derived.pack`, a read-only derived data cache the game's player reads:
 textures load compressed, as in the editor once its cache is warm, and nothing is
-compressed or cooked on players' machines.
+compressed or cooked on players' machines. The images your models and materials use are
+not copied into the build: the pack records their contents and stands in for them.
 
 ## What it costs
 

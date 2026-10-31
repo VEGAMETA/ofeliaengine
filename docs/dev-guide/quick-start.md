@@ -173,7 +173,8 @@ ofeliaengine build --ship     the same, built for shipping (slower to build, fas
 - **Textures and colliders** are compressed (BC7, BC5 for normal maps) and cooked at build
   time into `data/derived.pack`, through the editor's cache, so a texture the editor has
   shown is not compressed again. An image whose import settings keep it uncompressed
-  stays so.
+  stays so. The images your models and materials use are then left out of the build
+  (the pack stands in for them); a sprite's image goes in.
 - **Again:** files that did not change are kept, so the second build only compiles your
   code (seconds) and copies what changed. `builds/` is in the game's `.gitignore`.
 

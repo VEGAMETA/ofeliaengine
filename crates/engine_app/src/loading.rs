@@ -615,6 +615,17 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
             generation,
         } => {
             engine_profiler::zone!("assets::load::image");
+            // A built game's image left out of its folder: its texture by the pack's record.
+            if let Some(texture) = cache
+                .as_deref()
+                .and_then(|cache| cache.packed_texture(&path, key.usage()))
+            {
+                return Done::Texture {
+                    key,
+                    generation,
+                    result: Ok(Made::Cached(texture)),
+                };
+            }
             let result = std::fs::read(&path)
                 .map_err(|e| format!("{}: {e}", path.display()))
                 .and_then(|bytes| {
@@ -662,6 +673,14 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 .get(key.texture)
                 .ok_or_else(|| String::from("the file has no such texture"))
                 .and_then(|texture| {
+                    // A built game's image left out of its folder (ADR 0126's G3b).
+                    if let TextureSource::Uri(uri) = &texture.source
+                        && let Some(texture) = cache
+                            .as_deref()
+                            .and_then(|c| c.packed_texture(&file.dir.join(uri), key.usage()))
+                    {
+                        return Ok(Made::Cached(texture));
+                    }
                     let bytes = read_texture(&texture.source, Some(&file.dir))
                         .map_err(|e| e.to_string())?;
                     // An image file's own settings, or its model's for one inside it (E4-9):

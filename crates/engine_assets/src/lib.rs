@@ -44,8 +44,9 @@ pub use cook::{
     write_pack,
 };
 pub use ddc::{
-    CacheOutcome, DERIVED_PACK, DerivedDataCache, EntryName, cached_texture, import_texture,
-    texture_from_bytes, texture_key, texture_to_bytes,
+    CacheOutcome, DERIVED_PACK, DerivedDataCache, EntryName, SOURCE_KIND, cached_texture,
+    import_texture, path_under, source_key, texture_from_bytes, texture_key, texture_key_of,
+    texture_to_bytes,
 };
 pub use gltf_import::{
     AlphaMode, AnimationData, ChannelData, ChannelKeys, ClearcoatData, ImportError, ImportedScene,

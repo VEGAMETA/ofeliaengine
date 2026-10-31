@@ -527,10 +527,7 @@ pub fn build(
         root.join(out)
     });
     let folder = output.join(folder_name(&file.name));
-    let written = write_folder(root, &plan, &program, &file.name, &folder, &mut tell)?;
-    if plan.made.contains(SOUND_PACK) {
-        sound_pack(&root.join(SOUNDS), &folder.join("data").join(SOUND_PACK))?;
-    }
+    // The derived data first: the images it stands in for are left out of the folder.
     tell(Step::Deriving);
     let jobs = engine_core::jobs::ThreadPool::builder()
         .thread_name("engine-build")
@@ -543,6 +540,13 @@ pub fn build(
         &folder.join("data").join(DERIVED_PACK),
         Some(&jobs),
     )?;
+    for image in &derived.left_out {
+        plan.files.remove(image);
+    }
+    let written = write_folder(root, &plan, &program, &file.name, &folder, &mut tell)?;
+    if plan.made.contains(SOUND_PACK) {
+        sound_pack(&root.join(SOUNDS), &folder.join("data").join(SOUND_PACK))?;
+    }
     if let Some(shaders) = shaders {
         let key = materials::material_key(root, shaders, &plan, &types);
         let pack = folder.join("data").join(MATERIAL_PACK);

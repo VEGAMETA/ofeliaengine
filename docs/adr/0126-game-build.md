@@ -83,7 +83,7 @@
 |---|---|
 | **G1** | the build file, the dependency walk, `ofeliaengine build`: the game built, its scenes and the assets they reach in the folder as they are now read (a runnable build, option 2's shape), notices, `plugins/`; the run-from-the-folder test |
 | **G2** | material types and graphs to SPIR-V at build time, the player loading them (no Slang at run time) |
-| **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs. In three: **G3a** the derived data (compressed textures, cooked colliders) in one read-only pack beside the sources; **G3b** the models and images cooked, their sources left out; **G3c** navigation baked |
+| **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs. In three: **G3a** the derived data (compressed textures, cooked colliders) in one read-only pack beside the sources; **G3b** the images the pack stands in for left out (the models stay glTF, below); **G3c** navigation baked |
 | **G4** | the editor's Build: the settings section, the task, errors at their causes, Run the Build |
 | **G5** | scripts as Luau bytecode, the PSO warm-up list, a size report, an optional zip |
 
@@ -207,6 +207,32 @@ colliders again on every run. G3a carries what the editor's cache would hold.
 - **Left for G3b:** the sources still go in beside the pack (the keys are their bytes'
   hashes); the glTF files are still imported when loaded; HDR panoramas (the sky) are not
   in the pack.
+
+## As built (G3b, 2026-11-01): the images left out
+
+- **Decision (team, 2026-11-01):** G3b leaves out the images, not the models. A built
+  game's weight is its images (FlightHelmet: 45 MB of PNG beside a 3 MB `.gltf` and
+  `.bin`), and they were already in the pack compressed; a glTF's `.bin` is the meshes'
+  binary data, read as it is. A cooked model format (no JSON, meshes laid out for the GPU,
+  meshlets) waits until a measurement shows glTF loading costs a built game's start; the
+  scene packs of ADR 0056 remain the cooked form for streamed worlds.
+- **The pack names its images' contents:** an entry of kind `source`, keyed by the
+  image's path under the game's folder (`engine_assets::source_key`), holds the XXH3-128
+  of its bytes; `texture_key_of(content, usage)` is the texture key without the bytes;
+  `DerivedDataCache::packed_texture(file, usage)` finds a texture by its file's path under
+  the pack's folder.
+- **The build** records each compressed image's content and leaves out the images the
+  models and material files use (`Derived::left_out`), before the folder is written.
+  Sprites' images (and any other image a game may read by path) and images kept
+  uncompressed go in.
+- **The player's loader** asks the pack before reading an image (a material type's
+  parameter, a glTF's image file); an image inside a `.glb` is read from it as before.
+- **Measured on ref-1:** the FlightHelmet game's `data/` from about 120 MB to 72 MB (its
+  15 images left out; the pack is 71.3 MB of it); the build as fast as before (7.1 s the
+  first time, 0.1 s again).
+- **Tests:** the material's image left out and found by its path under the pack's folder
+  (for its use only), the sprite's kept; a built game's player drawing a model whose image
+  file was removed, its texture compressed from the pack.
 
 ## Questions for the team
 
