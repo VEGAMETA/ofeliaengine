@@ -775,8 +775,10 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   projection; a pixel's world size the same at every depth).
 - **Tests:** the zoom's steps from 330 % (400, 200, 100, 50, 25, back to 100 %), a drag's
   pan at any distance, no turning, framing in XY, the projection's top edge.
-- **Left (E13-1b-2 and later):** the view turning 2D by itself when the scene's main camera
-  is orthographic; the pixel grid from 800 %, the game camera's frame; snapping by art
+- **E13-1b-2:** a scene whose main camera (the highest priority active one) is
+  orthographic opens in the 2D view, a perspective one's in 3D; **an image dropped on the
+  2D view is a sprite** of it at the pointer on the XY plane, its place on whole art
+  pixels, selected, one undo step (test: dropped, snapped, one step, 3D back as it was).
+- **Left (E13-1b-3 and later):** the pixel grid from 800 %, the game camera's frame; snapping by art
   pixels (Shift) and to the tile grid (Ctrl); the 2D gizmo (x and y arrows, the square,
-  the ring about z); picking sprites by their pixels and their outlines; images dropped as
-  sprites.
+  the ring about z); picking sprites by their pixels and their outlines.

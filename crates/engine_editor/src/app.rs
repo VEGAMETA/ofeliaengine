@@ -25329,6 +25329,9 @@ impl Editor {
                 }
             },
             (DropTarget::Row(e), K::Sound) => self.give_sound(world, e, &drag),
+            (DropTarget::View, K::Texture) if self.orbit.flat.is_some() => {
+                self.add_sprite(world, &drag);
+            }
             (DropTarget::Tree, K::Sound) => self.add_sound(world, &drag, None),
             (DropTarget::Field(section, field), _) => {
                 self.drop_on_field(world, section, field, &mut drag);
@@ -26363,6 +26366,40 @@ impl Editor {
     /// A new entity playing dropped sound `drag` (E11-3d), named after its file: placed at
     /// `at` with an `AudioSource3D`, or (dropped into the tree) heard as it is with an
     /// `AudioSource`; selected, one undo step.
+    /// An image dropped on the 2D view (ADR 0125's E13-1b): a sprite of it at the pointer,
+    /// on the XY plane, its place snapped to the art's pixels, one undo step.
+    fn add_sprite(&mut self, world: &mut World, drag: &AssetDrag) {
+        let at = match (self.view_rect, self.input.cursor()) {
+            (Some(rect), Some([x, y])) => {
+                let view = ViewProj::new(&self.orbit, rect);
+                crate::gizmo::hit_plane(view.ray(Vec2::new(x, y)), Vec3::ZERO, Vec3::Z)
+                    .unwrap_or(self.orbit.target)
+            }
+            _ => self.orbit.target,
+        };
+        let snap = |v: f32| (v * ART_PIXELS_PER_UNIT).round() / ART_PIXELS_PER_UNIT;
+        let at = Vec3::new(snap(at.x), snap(at.y), 0.0);
+        let stem = drag
+            .name
+            .rsplit_once('.')
+            .map_or(drag.name.as_str(), |(stem, _)| stem);
+        let name = self.sibling_name(world, None, stem, None);
+        let order = self.last_root_order(world);
+        self.history.begin(&format!("Add {}", drag.name), None);
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(&name),
+            Transform::from_translation(at),
+            GlobalTransform::default(),
+            RootOrder(order),
+            engine_app::Sprite::new(AssetRef::file(drag.asset)),
+        ));
+        self.history.touch_new(world, e);
+        self.history.commit(world);
+        self.show(world, e);
+        self.say(format!("{name}: a sprite of {}", drag.name));
+    }
+
     fn add_sound(&mut self, world: &mut World, drag: &AssetDrag, at: Option<Vec3>) {
         let sound = match self.sound_name(drag) {
             Ok(s) => s,
@@ -27333,6 +27370,20 @@ impl Editor {
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
     /// left out), the tree's closed rows, the filters, the tool.
     fn apply_view(&mut self, world: &mut World, view: &View) {
+        // A scene seen through an orthographic camera opens in the 2D view (ADR 0125's
+        // E13-1b), a perspective one's in 3D.
+        let editor = self.camera;
+        let mut cameras = QueryState::<(Entity, &Camera)>::new(world);
+        let flat = cameras
+            .iter_readonly(world)
+            .filter(|&(e, c)| Some(e) != editor && c.active != 0)
+            .max_by_key(|(_, c)| c.priority)
+            .map(|(_, c)| c.is_orthographic());
+        if let Some(flat) = flat
+            && flat != self.orbit.flat.is_some()
+        {
+            self.run(world, self.ids.view_2d);
+        }
         if let Some(([x, y, z], yaw, pitch, distance)) = view.camera {
             self.orbit.target = Vec3::new(x, y, z);
             self.orbit.yaw = yaw;
@@ -34048,6 +34099,52 @@ mod tests {
         assert_eq!(material(&world, boxed), builtin::MATERIAL, "its own back");
         ed.history.redo(&mut world);
         assert_eq!(material(&world, boxed), tried);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 2D view (ADR 0125's E13-1b): an image dropped on it is a sprite of it at the
+    /// pointer, its place on whole art pixels, one undo step; View: 2D again is the 3D view
+    /// as it was.
+    #[test]
+    fn an_image_dropped_on_the_2d_view_is_a_sprite_there() {
+        let (dir, mut world, mut ed, _) = drop_project("drop-sprite");
+        let rgba = [255u8; 4 * 16 * 16];
+        let png =
+            engine_render::png::encode_png(16, 16, engine_render::png::PngFormat::Rgba, &rgba)
+                .unwrap();
+        std::fs::write(dir.join("props/coin.png"), png).unwrap();
+        ed.open_assets();
+        ed.open_folder("props");
+        ed.update(&mut world);
+        let before = ed.orbit;
+        let id = ed.ids.view_2d;
+        ed.run(&mut world, id);
+        assert!(ed.orbit.flat.is_some(), "2D");
+        drag_file(&mut ed, &mut world, "coin.png");
+        let at = view_middle(&ed);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 0.3, at[1]], Some(false));
+        ed.update(&mut world);
+        let coin = engine_scene::find_named(&mut world, "coin").expect("a sprite");
+        assert!(world.get::<engine_app::Sprite>(coin).is_some());
+        let t = world.get::<Transform>(coin).unwrap().translation;
+        assert_eq!(t.z, 0.0);
+        for v in [t.x, t.y] {
+            assert!(
+                ((v * 16.0) - (v * 16.0).round()).abs() < 1e-4,
+                "on an art pixel: {t}"
+            );
+        }
+        assert_eq!(ed.history.steps().count(), 1);
+        let id = ed.ids.view_2d;
+        ed.run(&mut world, id);
+        let back = ed.orbit;
+        assert!(back.flat.is_none());
+        assert_eq!(
+            (back.yaw, back.pitch, back.distance),
+            (before.yaw, before.pitch, before.distance)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

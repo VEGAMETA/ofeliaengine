@@ -1800,7 +1800,9 @@ with the right or middle button to pan, turn the wheel to zoom about the pointer
 goes by whole numbers of your art's pixels (100 %, 200 %, 300 % …, at 16 pixels a metre),
 so pixel art stays sharp; **Ctrl+0** shows it at 100 %. **F** frames the selection, and
 **View: 2D** again goes back to the 3D view where you left it. 3D models are not drawn in
-the 2D view.
+the 2D view. A scene whose main camera is orthographic opens in the 2D view by itself.
+Drop an image from the FileSystem dock onto the 2D view and it becomes a sprite where you
+let go, on a whole pixel of the art.
 
 ## Building the game
 
