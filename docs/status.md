@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E14's research and ADR 0126, the one-button game build** (#PR, proposed, 5 questions):
+  - **E14's research and ADR 0126, the one-button game build** (#498, proposed, 5 questions):
     `docs/research/game-build.md` (Godot's presets and PCKs, Unity's Build Profiles,
     Unreal's cook and IoStore, Fyrox's exporter, Bevy); a committed build file, the scenes
     listed and what they reach, cooked packs with no Slang or glTF at run time,
