@@ -883,6 +883,12 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E14 G3a, the derived data in `derived.pack`** (#PR, ADR 0126's as-built G3a): a
+    built game's textures compressed (BC7/BC5 with mips) and its models' colliders cooked
+    at build time through the editor's cache into one read-only pack
+    (`DerivedDataCache::open_pack`, `recording`, `write_pack`), which its player reads as
+    its cache (before: RGBA8 and colliders cooked on every run); FlightHelmet's 15
+    textures in 7.6 s, 0.1 s again, 71.3 MB.
   - **E14 G2, material types compiled at build time** (#501, ADR 0126's as-built G2):
     `data/materials.pack` (`engine_assets::material_pack`: each type's layout and
     fragment SPIR-V, keyed by a hash of the engine's shaders and the game's modules),

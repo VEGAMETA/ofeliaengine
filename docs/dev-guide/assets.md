@@ -121,6 +121,13 @@ Sponza, counted from the first frame:
 | every texture visible (blurry) | 26–61 ms | 14 ms |
 | every level | 394–564 ms | 40–41 ms |
 
+## In a built game (ADR 0126)
+
+`ofeliaengine build` compresses the textures your scenes use and cooks your models'
+colliders into `data/derived.pack`, a read-only derived data cache the game's player reads:
+textures load compressed, as in the editor once its cache is warm, and nothing is
+compressed or cooked on players' machines.
+
 ## What it costs
 
 Sponza (104.5 MB once loaded, 71.5 MB in its pack), on the reference machine:

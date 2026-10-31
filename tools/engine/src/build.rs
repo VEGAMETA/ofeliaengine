@@ -136,6 +136,7 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
     let result = engine_build::build(&args.dir, &file, &options, |step| match step {
         Step::Planned { files } if !quiet => eprintln!("{files} files"),
         Step::Cargo(line) if !quiet => eprintln!("{line}"),
+        Step::Deriving if !quiet => eprintln!("compressing textures, cooking colliders"),
         Step::Materials { types } if !quiet => {
             eprintln!(
                 "compiling {types} material type{}",
@@ -149,13 +150,16 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
             if args.json {
                 println!(
                     "{{\"ok\":true,\"folder\":{},\"program\":{},\"kind\":{},\"files\":{},\
-                     \"material_types\":{},\"bytes\":{},\"copied\":{},\"removed\":{},\
+                     \"material_types\":{},\"textures\":{},\"derived_bytes\":{},\
+                     \"bytes\":{},\"copied\":{},\"removed\":{},\
                      \"compile_seconds\":{:.1},\"seconds\":{:.1}}}",
                     json(&built.folder.to_string_lossy()),
                     json(&built.program.to_string_lossy()),
                     json(built.kind.profile()),
                     built.files,
                     built.material_types,
+                    built.derived.textures,
+                    built.derived.bytes,
                     built.bytes,
                     built.copied,
                     built.removed,
@@ -165,7 +169,8 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
             } else {
                 println!(
                     "built {} ({}): {} files, {:.1} MB ({} copied, {} removed) in {:.1} s, \
-                     {:.1} s of it compiling",
+                     {:.1} s of it compiling; {} textures and {} models' colliders in \
+                     derived.pack ({:.1} MB, {:.1} s)",
                     built.program.display(),
                     built.kind.profile(),
                     built.files,
@@ -173,7 +178,11 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
                     built.copied,
                     built.removed,
                     built.seconds,
-                    built.compile_seconds
+                    built.compile_seconds,
+                    built.derived.textures,
+                    built.derived.models,
+                    built.derived.bytes as f64 / 1e6,
+                    built.derived.seconds
                 );
             }
             Ok(ExitCode::SUCCESS)

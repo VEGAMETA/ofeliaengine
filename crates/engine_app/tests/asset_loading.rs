@@ -963,3 +963,87 @@ fn previews_of_a_model_and_a_material_are_drawn_and_read_back() {
     assert!(sphere_middle[2] > sphere_middle[0], "{sphere_middle:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A built game (ADR 0126's G3a): its textures compressed at build time into
+/// `derived.pack`, which its player reads as its cache: loaded compressed at once, nothing
+/// compressed while it runs, nothing written beside it.
+#[test]
+fn a_built_games_derived_pack_gives_its_textures_compressed() {
+    let dir = std::env::temp_dir().join(format!("ofelia-derived-pack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props/textures")).unwrap();
+    std::fs::write(dir.join("props/quad.gltf"), quad_gltf("textures/paint.png")).unwrap();
+    std::fs::write(dir.join("props/textures/paint.png"), png([200, 30, 20])).unwrap();
+    let inline = format!("data:image/png;base64,{}", base64(&png([30, 200, 20])));
+    std::fs::write(dir.join("props/inline.gltf"), quad_gltf(&inline)).unwrap();
+    // The build's step, then the editor's cache it went through removed: only the pack.
+    let mut plan = engine_build::Plan::default();
+    for f in [
+        "props/quad.gltf",
+        "props/inline.gltf",
+        "props/textures/paint.png",
+    ] {
+        plan.files.insert(String::from(f));
+    }
+    let derived = engine_build::derived::derived_pack(
+        &dir,
+        &plan,
+        &dir.join("staging"),
+        &dir.join(engine_assets::DERIVED_PACK),
+        None,
+    )
+    .unwrap();
+    assert_eq!((derived.textures, derived.models), (2, 2));
+    std::fs::remove_dir_all(dir.join("staging")).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("derived pack test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let files = [
+        (AssetId::new(), "props/quad.gltf"),
+        (AssetId::new(), "props/inline.gltf"),
+    ];
+    let mut paths = AssetPaths::new();
+    for (id, path) in files {
+        paths.insert(AssetRef::file(id), path);
+    }
+    player.assets_mut().add_paths(&paths);
+    let quads = files.map(|(id, _)| {
+        player.world_mut().spawn((
+            SceneId::new(),
+            Transform::IDENTITY,
+            Model::new(AssetRef::part(id, "Quad"), AssetRef::part(id, "Painted")),
+        ))
+    });
+    let ready = |player: &mut Player| {
+        quads
+            .iter()
+            .all(|&e| player.world_mut().get::<MeshRenderer>(e).is_some())
+            && player.assets().loading() == 0
+    };
+    frames_until(&mut player, ready).expect("drawn");
+    assert_eq!(player.assets().textures_made(), 2);
+    assert_eq!(player.assets().textures_compressed(), 2, "from the pack");
+    assert_eq!(player.assets().compressing(), 0, "nothing compressed");
+    drop(player);
+    assert!(!dir.join("staging").exists() && !dir.join(".ofelia").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

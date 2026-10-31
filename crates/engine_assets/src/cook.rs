@@ -298,7 +298,7 @@ fn color_usage(alpha: AlphaMode) -> TextureUsage {
 
 /// Every distinct use of a texture by the materials: `(texture, usage)`. The usage decides
 /// how its mip levels are filtered and compressed.
-fn texture_uses(scene: &ImportedScene) -> Vec<(usize, TextureUsage)> {
+pub fn texture_uses(scene: &ImportedScene) -> Vec<(usize, TextureUsage)> {
     let mut uses = Vec::new();
     let mut add = |texture: Option<usize>, usage| {
         if let Some(texture) = texture

@@ -69,3 +69,5 @@ bytemuck = { version = "1.25", features = ["derive"] }
 engine_assets.workspace = true
 # A material graph's editing build, for its node previews' test (ADR 0123's E10-4g).
 engine_material_graph.workspace = true
+# A built game's derived data pack, made as `ofeliaengine build` makes it (ADR 0126's G3a).
+engine_build.workspace = true
