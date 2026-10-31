@@ -879,6 +879,11 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E14's research and ADR 0126, the one-button game build** (#PR, proposed, 5 questions):
+    `docs/research/game-build.md` (Godot's presets and PCKs, Unity's Build Profiles,
+    Unreal's cook and IoStore, Fyrox's exporter, Bevy); a committed build file, the scenes
+    listed and what they reach, cooked packs with no Slang or glTF at run time,
+    `builds/<name>/`, one code path for the editor and `ofeliaengine build --json`; G1–G5.
   - **E12-5d-2d-2, the character in the graph's corner** (#497, ADR 0124's as-built): outside
     Play the canvas's corner shows the graph's preview model (else a character playing it)
     playing the tab's copy on its spot, turned by a drag, the canvas lit by it; each
