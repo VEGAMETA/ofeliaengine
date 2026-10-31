@@ -883,6 +883,9 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E13-1b-4, the game camera's frame** (#512): the main orthographic camera's
+    rectangle in the 2D view; fix: the editor's 2D camera now orthographic (#509 set only
+    its height, so the view drew in perspective).
   - **E13-1b-3, 2D snapping and the pixel grid** (#511): positions step by art pixels in
     2D (the 3D step back in 3D); a pixel grid from 800 %.
   - **E13-1b-2, sprites dropped and scenes opening in 2D** (#510): an image dropped on the

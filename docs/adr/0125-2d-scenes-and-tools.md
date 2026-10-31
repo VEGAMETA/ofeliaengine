@@ -784,6 +784,13 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   from 800 %**, a faint line on every art pixel's edge in sight (a reused vector: nothing
   allocated a frame once grown). Test: the step, no grid at 400 %, a line per 8 screen
   pixels at 800 %.
-- **Left (E13-1b-4 and later):** the game camera's frame; Ctrl snapping to a tile map's
-  cells (with E13-3); the 2D gizmo (x and y arrows, the square,
+- **E13-1b-4:** **the game camera's frame** in the 2D view: the rectangle the scene's main
+  orthographic camera shows, at its reference size's shape (16:9 without one), in amber.
+  **A fix to E13-1b-1:** the editor's camera in 2D now sets `Camera::projection` to
+  orthographic (it set only the height, which does not make a camera orthographic, so the
+  2D view drew in perspective); a test checks it. **The gizmo is 2D as it is:** in the
+  orthographic view the z arrow points at the eye and is left out (an axis seen end-on),
+  the x and y arrows, the square between them and the ring about z remain.
+- **Left (E13-1b-5 and later):** Ctrl snapping to a tile map's cells (with E13-3); the 2D
+  gizmo's own look (x and y arrows, the square,
   the ring about z); picking sprites by their pixels and their outlines.

@@ -4024,6 +4024,10 @@ struct Editor {
     /// The 2D view's pixel grid from 800 % (ADR 0125's E13-1b): a line between every two of
     /// the art's pixels in sight; empty below.
     pixel_grid: Vec<[Vec3; 2]>,
+    /// The game camera's frame in the 2D view (E13-1b): what the scene's main orthographic
+    /// camera shows; empty in 3D or without one.
+    camera_frame: Vec<[Vec3; 2]>,
+    cameras_q: Option<QueryState<(Entity, &'static Camera, &'static GlobalTransform)>>,
     nav_key: BlockoutKey,
     nav_job: Option<std::sync::mpsc::Receiver<Result<NavBaked, String>>>,
     nav_changed: Option<(Instant, BlockoutKey)>,
@@ -4974,6 +4978,8 @@ impl Editor {
             nav_edges: Vec::new(),
             nav_lines: Default::default(),
             pixel_grid: Vec::new(),
+            camera_frame: Vec::new(),
+            cameras_q: None,
             nav_key: Vec::new(),
             nav_job: None,
             nav_changed: None,
@@ -8928,6 +8934,7 @@ impl Editor {
         self.fit_zone(world);
         self.input.next_frame();
         self.pixel_grid_frame();
+        self.camera_frame_frame(world);
         let eye = self.orbit.eye();
         if let Some(camera) = camera
             && let Some(c) = world.get_mut::<Camera>(camera)
@@ -8935,11 +8942,13 @@ impl Editor {
             // Orthographic in 2D (ADR 0125's E13-1b), as the 2D pass draws it.
             match self.orbit.flat {
                 Some(height) => {
+                    c.projection = Camera::ORTHOGRAPHIC;
                     c.height = height;
                     c.near = -crate::camera::FLAT_DEPTH;
                     c.far = crate::camera::FLAT_DEPTH;
                 }
                 None => {
+                    c.projection = Camera::PERSPECTIVE;
                     c.height = 0.0;
                     c.fov_y = self.orbit.fov_y;
                     c.near = self.orbit.near;
@@ -12653,6 +12662,41 @@ impl Editor {
                 self.run(world, self.ids.redo);
             }
         }
+    }
+
+    /// The game camera's frame in the 2D view (ADR 0125's E13-1b): the rectangle the
+    /// scene's main orthographic camera (the highest priority active one, not the editor's)
+    /// shows, at its reference size's shape (16:9 without one); nothing in 3D.
+    fn camera_frame_frame(&mut self, world: &mut World) {
+        self.camera_frame.clear();
+        if self.orbit.flat.is_none() {
+            return;
+        }
+        let editor = self.camera;
+        let q = self.cameras_q.get_or_insert_with(|| QueryState::new(world));
+        let main = q
+            .iter_readonly(world)
+            .filter(|&(e, c, _)| Some(e) != editor && c.active != 0)
+            .max_by_key(|(_, c, _)| c.priority)
+            .filter(|(_, c, _)| c.is_orthographic())
+            .map(|(_, c, t)| (*c, t.translation()));
+        let Some((camera, at)) = main else {
+            return;
+        };
+        let aspect = camera
+            .reference_size()
+            .map_or(16.0 / 9.0, |(w, h)| w as f32 / h.max(1) as f32);
+        let half = Vec2::new(camera.height * aspect, camera.height) * 0.5;
+        let z = self.orbit.target.z;
+        let corner = |x: f32, y: f32| Vec3::new(at.x + x * half.x, at.y + y * half.y, z);
+        let [a, b, c, d] = [
+            corner(-1.0, -1.0),
+            corner(1.0, -1.0),
+            corner(1.0, 1.0),
+            corner(-1.0, 1.0),
+        ];
+        self.camera_frame
+            .extend_from_slice(&[[a, b], [b, c], [c, d], [d, a]]);
     }
 
     /// The 2D view's pixel grid (ADR 0125's E13-1b): from 800 % (8 screen pixels an art
@@ -32583,6 +32627,12 @@ impl Overlay for EditorOverlay {
                             color: [1.0, 1.0, 1.0, 0.14],
                             hidden: 1.0,
                         },
+                        // The game camera's frame (E13-1b).
+                        LineBatch {
+                            lines: &editor.camera_frame,
+                            color: [1.0, 0.85, 0.3, 0.9],
+                            hidden: 1.0,
+                        },
                     ];
                     self.line_lists.add_passes(
                         pass.fg,
@@ -34171,6 +34221,15 @@ mod tests {
         let id = ed.ids.view_2d;
         ed.run(&mut world, id);
         assert!(ed.orbit.flat.is_some(), "2D");
+        ed.update(&mut world);
+        let editor_camera = ed.camera.unwrap();
+        assert!(
+            world
+                .get::<Camera>(editor_camera)
+                .unwrap()
+                .is_orthographic(),
+            "the editor's camera draws orthographic"
+        );
         assert_eq!(
             ed.snapping.position,
             1.0 / 16.0,
@@ -34179,6 +34238,19 @@ mod tests {
         // The pixel grid from 800 %: none at the 400 % the view starts at.
         ed.update(&mut world);
         assert!(ed.pixel_grid.is_empty());
+        // No game camera, no frame; a pixel-art camera of 320 × 180 at 16 a metre: its
+        // 20 × 11.25 m rectangle.
+        assert!(ed.camera_frame.is_empty());
+        world.spawn((
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            Camera::pixel_art([320, 180], 16.0),
+        ));
+        ed.update(&mut world);
+        assert_eq!(ed.camera_frame.len(), 4);
+        let [a, b] = ed.camera_frame[0];
+        let [_, c] = ed.camera_frame[1];
+        assert!(((b.x - a.x) - 20.0).abs() < 1e-4 && ((c.y - b.y) - 11.25).abs() < 1e-4);
         let h = ed.view_rect.unwrap()[3] as f32;
         ed.orbit.flat = Some(h / (8.0 * 16.0));
         ed.update(&mut world);
