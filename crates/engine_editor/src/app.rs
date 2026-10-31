@@ -4021,6 +4021,9 @@ struct Editor {
     nav_edges: Vec<(Vec3, Vec3, bool)>,
     /// Those edges as the overlay draws them ([`nav_lines`]).
     nav_lines: [Vec<[Vec3; 2]>; 2],
+    /// The 2D view's pixel grid from 800 % (ADR 0125's E13-1b): a line between every two of
+    /// the art's pixels in sight; empty below.
+    pixel_grid: Vec<[Vec3; 2]>,
     nav_key: BlockoutKey,
     nav_job: Option<std::sync::mpsc::Receiver<Result<NavBaked, String>>>,
     nav_changed: Option<(Instant, BlockoutKey)>,
@@ -4099,8 +4102,10 @@ struct Editor {
     /// The active reverb zone's label in the viewport: its room and priority (E11-4c).
     zone_label: String,
     camera_move: Option<(OrbitCamera, OrbitCamera, Instant)>,
-    /// The 3D view's camera while the view is 2D (ADR 0125's E13-1b): back when it is 3D.
+    /// The 3D view's camera while the view is 2D (ADR 0125's E13-1b): back when it is 3D;
+    /// with the 3D view's position step (2D steps by the art's pixels).
     orbit_3d: Option<OrbitCamera>,
+    position_step_3d: f64,
     /// Shift+F: the entity the camera follows and where it last was.
     follow: Option<(Entity, Vec3)>,
     /// The camera's bookmarks, 1 to 9 (the document's; the session keeps them).
@@ -4968,6 +4973,7 @@ impl Editor {
             show_nav: false,
             nav_edges: Vec::new(),
             nav_lines: Default::default(),
+            pixel_grid: Vec::new(),
             nav_key: Vec::new(),
             nav_job: None,
             nav_changed: None,
@@ -5008,6 +5014,7 @@ impl Editor {
             zone_label: String::new(),
             camera_move: None,
             orbit_3d: None,
+            position_step_3d: 0.1,
             follow: None,
             bookmarks: [None; 9],
             surface_request: None,
@@ -8920,6 +8927,7 @@ impl Editor {
         self.drop_frame(world);
         self.fit_zone(world);
         self.input.next_frame();
+        self.pixel_grid_frame();
         let eye = self.orbit.eye();
         if let Some(camera) = camera
             && let Some(c) = world.get_mut::<Camera>(camera)
@@ -12644,6 +12652,39 @@ impl Editor {
                 }
                 self.run(world, self.ids.redo);
             }
+        }
+    }
+
+    /// The 2D view's pixel grid (ADR 0125's E13-1b): from 800 % (8 screen pixels an art
+    /// pixel), a line on every art pixel's edge in the view; kept in its vector, so a frame
+    /// allocates nothing once it has grown.
+    fn pixel_grid_frame(&mut self) {
+        self.pixel_grid.clear();
+        let (Some(height), Some([_, _, w, h])) = (self.orbit.flat, self.view_rect) else {
+            return;
+        };
+        let (w, h) = (w as f32, h as f32);
+        let ppu = ART_PIXELS_PER_UNIT;
+        if h / (height * ppu) < 8.0 {
+            return;
+        }
+        let half = Vec2::new(height * w / h.max(1.0), height) * 0.5;
+        let c = self.orbit.target.truncate();
+        let (lo, hi) = (c - half, c + half);
+        let z = self.orbit.target.z;
+        let mut x = (lo.x * ppu).floor();
+        while x <= (hi.x * ppu).ceil() {
+            let at = x / ppu;
+            self.pixel_grid
+                .push([Vec3::new(at, lo.y, z), Vec3::new(at, hi.y, z)]);
+            x += 1.0;
+        }
+        let mut y = (lo.y * ppu).floor();
+        while y <= (hi.y * ppu).ceil() {
+            let at = y / ppu;
+            self.pixel_grid
+                .push([Vec3::new(lo.x, at, z), Vec3::new(hi.x, at, z)]);
+            y += 1.0;
         }
     }
 
@@ -19150,10 +19191,14 @@ impl Editor {
             match self.orbit_3d.take() {
                 Some(back) if self.orbit.flat.is_some() => {
                     self.orbit = back;
+                    self.snapping.position = self.position_step_3d;
                     self.say(String::from("3D view"));
                 }
                 _ => {
                     self.orbit_3d = Some(self.orbit);
+                    // Positions step by the art's pixels (Shift moves by one, Ctrl lands on one).
+                    self.position_step_3d = self.snapping.position;
+                    self.snapping.position = 1.0 / f64::from(ART_PIXELS_PER_UNIT);
                     let height = self.view_rect.map_or(720.0, |r| r[3] as f32);
                     self.orbit = OrbitCamera {
                         target: Vec3::new(self.orbit.target.x, self.orbit.target.y, 0.0),
@@ -32532,6 +32577,12 @@ impl Overlay for EditorOverlay {
                             color: TRAIL_COLOR,
                             hidden: 1.0,
                         },
+                        // The 2D view's pixel grid (E13-1b), over the sprites.
+                        LineBatch {
+                            lines: &editor.pixel_grid,
+                            color: [1.0, 1.0, 1.0, 0.14],
+                            hidden: 1.0,
+                        },
                     ];
                     self.line_lists.add_passes(
                         pass.fg,
@@ -34120,6 +34171,25 @@ mod tests {
         let id = ed.ids.view_2d;
         ed.run(&mut world, id);
         assert!(ed.orbit.flat.is_some(), "2D");
+        assert_eq!(
+            ed.snapping.position,
+            1.0 / 16.0,
+            "positions step by art pixels"
+        );
+        // The pixel grid from 800 %: none at the 400 % the view starts at.
+        ed.update(&mut world);
+        assert!(ed.pixel_grid.is_empty());
+        let h = ed.view_rect.unwrap()[3] as f32;
+        ed.orbit.flat = Some(h / (8.0 * 16.0));
+        ed.update(&mut world);
+        let rect = ed.view_rect.unwrap();
+        let lines = ed.pixel_grid.len();
+        let expected = (rect[2] + rect[3]) as usize / 8;
+        assert!(
+            lines >= expected && lines <= expected + 6,
+            "{lines} lines, {expected}"
+        );
+        ed.orbit.flat = Some(h / (4.0 * 16.0));
         drag_file(&mut ed, &mut world, "coin.png");
         let at = view_middle(&ed);
         mouse(&mut ed, at, None);
@@ -34141,6 +34211,7 @@ mod tests {
         ed.run(&mut world, id);
         let back = ed.orbit;
         assert!(back.flat.is_none());
+        assert_eq!(ed.snapping.position, 0.1, "the 3D step back");
         assert_eq!(
             (back.yaw, back.pitch, back.distance),
             (before.yaw, before.pitch, before.distance)

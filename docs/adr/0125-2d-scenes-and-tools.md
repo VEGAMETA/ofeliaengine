@@ -779,6 +779,11 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   orthographic opens in the 2D view, a perspective one's in 3D; **an image dropped on the
   2D view is a sprite** of it at the pointer on the XY plane, its place on whole art
   pixels, selected, one undo step (test: dropped, snapped, one step, 3D back as it was).
-- **Left (E13-1b-3 and later):** the pixel grid from 800 %, the game camera's frame; snapping by art
-  pixels (Shift) and to the tile grid (Ctrl); the 2D gizmo (x and y arrows, the square,
+- **E13-1b-3:** in the 2D view positions step by the art's pixels (1/16 m: Shift moves by
+  one, Ctrl lands on one, under the owner's rules), the 3D step back in 3D; **the pixel grid
+  from 800 %**, a faint line on every art pixel's edge in sight (a reused vector: nothing
+  allocated a frame once grown). Test: the step, no grid at 400 %, a line per 8 screen
+  pixels at 800 %.
+- **Left (E13-1b-4 and later):** the game camera's frame; Ctrl snapping to a tile map's
+  cells (with E13-3); the 2D gizmo (x and y arrows, the square,
   the ring about z); picking sprites by their pixels and their outlines.
