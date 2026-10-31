@@ -883,7 +883,7 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
-  - **E14 G3b, images left out of a build** (#PR, ADR 0126's as-built G3b, team decision:
+  - **E14 G3b, images left out of a build** (#503, ADR 0126's as-built G3b, team decision:
     the models stay glTF until a measurement says otherwise): `derived.pack` records each
     image's content by its path (`source` entries, `texture_key_of`, `packed_texture`), the
     player's loader asks it before reading an image, the build leaves out the images models
