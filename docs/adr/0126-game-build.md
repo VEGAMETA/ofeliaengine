@@ -265,6 +265,23 @@ derived data, at load in the editor), and the paths API.
 - **Tests:** cargo's lines at their levels; a folder that is not a game's said at once with
   no file made; a missing file's report.
 
+## As built (G5a, 2026-11-01): the PSO record from Play
+
+- **The editor records** at each Stop the material types' entry points its frames drew
+  (`ForwardRenderer::material_type_entries_drawn`) into `game.pso.ron` beside `game.build`
+  (`engine_build::PSO_RECORD`; ADR 0092's record, merged, only growing, sorted, so the
+  team commits and shares it); nothing is written when no type was drawn or the record
+  already has them.
+- **The build** compiles a type the record names for the entry points it lists only
+  (`SlangMaterialTypes::with_pso_record`); a type it does not name whole, as before; the
+  record is part of the material pack's key.
+- **Measured on ref-1:** the stripes type recorded with one entry point and a graph's type
+  not recorded: the pack from 696 KB (318 entry points) to 154 KB, the compile from 11.4 s to
+  about 5 s.
+- **Left:** warming the recorded pipelines up at load (they are made when first drawn, the
+  look drawing meanwhile); a test of the record written at Stop (the build's side is
+  tested).
+
 ## Questions for the team
 
 1. **What form the shipped content takes.**

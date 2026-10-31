@@ -28640,6 +28640,10 @@ impl<G> EditorGame<G> {
         }
         player.end_run();
         player.set_simulating(false);
+        // The material types' entry points drawn so far, merged into the game's PSO record
+        // (ADR 0126's G5a): its build compiles only those.
+        let root = self.shared.borrow().root.clone();
+        record_pso(player, &root);
         let mut shared = self.shared.borrow_mut();
         if let Some(playing) = shared.play.take() {
             let message = shared.finish_play(player.world_mut(), playing, why);
@@ -32678,6 +32682,33 @@ impl Overlay for EditorOverlay {
         // renderer's pipelines and buffers.
         unsafe { old.destroy(setup.allocator) };
         Ok(())
+    }
+}
+
+/// The material types' entry points `player` drew so far merged into the PSO record of the
+/// game at `root` (ADR 0126's G5a; nothing written when no type was drawn, or when the
+/// record already has them); a record that cannot be written is said in the log.
+fn record_pso(player: &Player, root: &Path) {
+    let mut record = engine_assets::pso_record::PsoRecord::new();
+    for (desc, entries) in player.renderer().forward().material_type_entries_drawn() {
+        for entry in entries {
+            record.add(&desc.module, &desc.type_name, &entry);
+        }
+    }
+    if record.is_empty() {
+        return;
+    }
+    let path = root.join(engine_build::PSO_RECORD);
+    let unchanged = engine_assets::pso_record::PsoRecord::load(&path).is_ok_and(|on_disk| {
+        let mut merged = on_disk.clone();
+        merged.merge(&record);
+        merged == on_disk
+    });
+    if unchanged {
+        return;
+    }
+    if let Err(e) = record.save_merged(&path) {
+        log::warn!(target: "engine_editor", "{}: {e}", path.display());
     }
 }
 

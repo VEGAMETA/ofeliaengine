@@ -10,6 +10,9 @@
 //!   and what it includes), the types, and every Slang module in the plan. A pack of the same
 //!   key is kept; another is compiled again, every type's fragment entry points and its
 //!   parameters' layout.
+//! - **The PSO record** (`game.pso.ron`, G5a): a type it names is compiled for the entry
+//!   points it lists only, those the editor's Play drew; a type it does not name whole. The
+//!   record is part of the key.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -106,6 +109,7 @@ pub fn material_key(root: &Path, shaders: &Path, plan: &Plan, types: &[MaterialT
     for file in plan.files.iter().filter(|f| extension(f) == "slang") {
         add(file, &root.join(file));
     }
+    add(crate::PSO_RECORD, &root.join(crate::PSO_RECORD));
     for t in types {
         bytes.extend_from_slice(t.module.as_bytes());
         bytes.push(0);
@@ -135,6 +139,11 @@ pub fn material_pack(
     }
     let mut builder = SlangMaterialTypes::new(shaders)
         .map_err(|e| BuildError::new(format!("material types: no Slang compiler ({e})")))?;
+    let record = engine_assets::pso_record::PsoRecord::load(&root.join(crate::PSO_RECORD))
+        .map_err(|e| BuildError::new(format!("{}: {e}", crate::PSO_RECORD)))?;
+    if !record.is_empty() {
+        builder = builder.with_pso_record(record);
+    }
     let mut out = MaterialPack {
         key,
         types: Vec::with_capacity(types.len()),
@@ -294,6 +303,43 @@ mod tests {
         assert!(
             !material_pack(&root, shaders, &types, key, &pack).unwrap(),
             "kept"
+        );
+        // A PSO record naming the stripes' one entry point: only that compiled for it, the
+        // graph's type (not named) whole; the record moves the key.
+        let mut record = engine_assets::pso_record::PsoRecord::new();
+        record.add(
+            &root.join("materials/stripes.slang"),
+            "StripesMaterial",
+            "fragmentMain",
+        );
+        record.save_merged(&root.join(crate::PSO_RECORD)).unwrap();
+        let recorded = material_key(&root, shaders, &plan, &types);
+        assert_ne!(recorded, key);
+        assert!(material_pack(&root, shaders, &types, recorded, &pack).unwrap());
+        let read = MaterialPack::load(&pack).unwrap().unwrap();
+        let stripes = read
+            .find("materials/stripes.slang", "StripesMaterial")
+            .unwrap();
+        assert_eq!(
+            stripes
+                .entries
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            ["fragmentMain"]
+        );
+        let graph = read
+            .types
+            .iter()
+            .find(|t| t.type_name == "GraphMaterial")
+            .unwrap();
+        assert!(
+            graph.entries.len() > 1,
+            "a type the record does not name: whole"
+        );
+        println!(
+            "with the record: {} KB",
+            std::fs::metadata(&pack).unwrap().len() / 1024
         );
         let _ = std::fs::remove_dir_all(&root);
     }
