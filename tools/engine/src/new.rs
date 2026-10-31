@@ -227,12 +227,18 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         // the scripts' types it writes.
         (
             ".gitignore",
-            String::from("/target\n*.pack\n/.ofelia/\n/types/\n"),
+            String::from("/target\n*.pack\n/.ofelia/\n/types/\n/builds/\n"),
         ),
         (".vscode/settings.json", String::from(VSCODE_SETTINGS)),
         (".vscode/launch.json", String::from(VSCODE_LAUNCH)),
         (".vscode/extensions.json", String::from(VSCODE_EXTENSIONS)),
         ("README.md", readme(&name, &engine)),
+        // Its build (ADR 0126): `ofeliaengine build` and the editor's Build read it.
+        (
+            engine_build::BUILD_FILE,
+            engine_build::BuildFile::for_game(Path::new(""), &name, "scenes/main.scene")
+                .to_text(AssetId::new()),
+        ),
     ];
     files.extend(assets()?);
     // The engine's dependencies at the versions it is tested with, which every game on it
@@ -606,6 +612,10 @@ mod tests {
             main.contains("engine_app::main!(settings, start);") && !main.contains("pub(crate)")
         );
         assert!(read(".gitignore").lines().any(|l| l == "/.ofelia/"));
+        assert!(read(".gitignore").lines().any(|l| l == "/builds/"));
+        let (build, _) = engine_build::BuildFile::parse(&read("game.build")).unwrap();
+        assert_eq!(build.start, "scenes/main.scene");
+        assert!(build.always.is_empty(), "{:?}", build.always);
         assert!(read(".gitignore").lines().any(|l| l == "/types/"));
         // luau-lsp in VS Code sees the engine's types as the editor writes them.
         let settings = read(".vscode/settings.json");

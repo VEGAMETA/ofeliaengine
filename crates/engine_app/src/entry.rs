@@ -14,6 +14,8 @@ pub type Start<G> = fn(&mut Player) -> Result<G, Box<dyn std::error::Error>>;
 /// - **The log** (ADR 0061): the engine's logger is installed unless the game installed
 ///   one, writing to stderr, a debugger's output window and
 ///   `%LOCALAPPDATA%\ofeliaengine\logs\<executable>.log`.
+/// - **A build's program** (ADR 0126, `ofeliaengine build`) finds its game's files in the
+///   `data/` folder beside it, where the settings name no project.
 /// - **The command line's `--debug` and `--wait-for-debugger`** ask for VS Code's script
 ///   debugger ([`PlayerSettings::debugger`], ADR 0119 E9-3) where the game's settings did
 ///   not.
@@ -36,6 +38,17 @@ pub fn run<G: Game>(
     });
     if settings.debugger.is_none() {
         settings.debugger = crate::DebuggerSettings::from_args(std::env::args_os().skip(1));
+    }
+    // A build's program (ADR 0126): its game's files are the `data/` beside it, its
+    // working folder too (the sound pack and the folders the settings name relative to it).
+    if settings.project.is_none()
+        && let Some(data) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join("data")))
+            .filter(|data| data.is_dir())
+    {
+        let _ = std::env::set_current_dir(&data);
+        settings.project = Some(data);
     }
     let mut player = Player::new(&settings)?;
     let mut game = start(&mut player)?;

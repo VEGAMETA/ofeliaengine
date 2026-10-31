@@ -150,7 +150,27 @@ PlayerSettings { pack: Some("level.pack".into()), ..settings }
 - **Its colliders and navigation mesh** are cooked in ([assets.md](assets.md),
   [physics.md](physics.md), [navigation.md](navigation.md)).
 
-## 8. Next
+## 8. Build it
+
+```text
+ofeliaengine build            a folder players run: builds/<name>/
+ofeliaengine build --ship     the same, built for shipping (slower to build, faster to run)
+```
+
+- **What you get:** `builds/<name>/<name>.exe`, its `data/` (your scenes and every file they
+  use, your sounds as `sounds.pack`), an empty `plugins/` (where players put NVIDIA's or
+  Intel's DLLs for DLSS or XeSS), and `THIRD_PARTY_NOTICES.txt` (keep it with the game).
+  Zip the folder and it runs anywhere on Windows 11 with a Vulkan 1.3 GPU.
+- **`game.build`** says what goes in: `start` (the first scene), `scenes` (the others),
+  `always` (folders and files your scripts load by path), `kind` (`Build` or `Ship`) and
+  `output` (`builds`, or any folder). `ofeliaengine new` makes it; edit it by hand or let
+  the editor do it.
+- **Only what is used goes in:** a file nothing names is left out, and a file named but
+  missing stops the build with the file that named it.
+- **Again:** files that did not change are kept, so the second build only compiles your
+  code (seconds) and copies what changed. `builds/` is in the game's `.gitignore`.
+
+## 9. Next
 
 | To | Read |
 |---|---|

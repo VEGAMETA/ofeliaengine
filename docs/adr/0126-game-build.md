@@ -1,6 +1,9 @@
 # ADR 0126: The one-button game build (E14)
 
-- Status: **Proposed** (2026-10-31). Five questions for the team at the end.
+- Status: **Accepted** (2026-10-31, team decisions 1а 2а 3а 4а 5а: every question as
+  recommended; on 5, `builds/` by default and another folder may be chosen, and a new
+  game's `.gitignore` names `/builds/`). The questions at the end keep their options for the
+  record.
 - Research: [the one-button game build](../research/game-build.md) (Godot's presets and
   PCKs, Unity's Build Profiles, Unreal's cook/stage/package and IoStore, Fyrox's exporter,
   Bevy).
@@ -83,6 +86,52 @@
 | **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs |
 | **G4** | the editor's Build: the settings section, the task, errors at their causes, Run the Build |
 | **G5** | scripts as Luau bytecode, the PSO warm-up list, a size report, an optional zip |
+
+## As built (G1, 2026-10-31): `ofeliaengine build` and a folder that runs
+
+- **`engine_build`** (a new crate, the one code path the editor's Build will call):
+  - `BuildFile` (`game.build`, the project's grammar, kind `build` version 1): `name`,
+    `start`, `scenes`, `always`, `kind` (`Build` = cargo's `release`, `Ship` =
+    `shipping`), `output` (`builds` by default, or another folder, absolute or under the
+    game's). `BuildFile::for_game` keeps `scripts/` and `loc/` always in when the game has
+    them, and the `.mixer` files at its root.
+  - `plan`: the start scene and the scenes, then every file reached: an `asset("path", …)`
+    in any text file (scenes, prefabs, materials, graphs, clips, mixers), a glTF file's
+    `uri`s (percent-decoded; `data:` none), each file's `.meta`; the folders always in,
+    whole; dot-files and dot-folders never. Files named and missing are listed with what
+    named them, and stop the build before cargo runs.
+  - `build`: cargo builds the game (`--profile release|shipping`, the `editor` feature
+    off, a `CARGO_TARGET_DIR` around it removed so the game's own `.cargo/config.toml`
+    decides, ADR 0111), its program found in cargo's JSON messages; then `write_folder`:
+    `<name>.exe`, `data/` (a file of the same size and no older kept, what the last build
+    had beyond the plan removed with its empty folders), `plugins/`, and
+    `THIRD_PARTY_NOTICES.txt` (the engine's, embedded at its build); the game's `sounds/`
+    folder becomes `data/sounds.pack` (made again only when a sound is newer), since a
+    released player reads the pack (ADR 0105).
+- **`ofeliaengine build [DIR] [--ship | --build] [--out DIR] [--json]`**: makes
+  `game.build` the first time (the package's name, `scenes/main.scene` or the first scene
+  found); `--json` prints one line (`ok`, `folder`, `program`, `kind`, `files`, `bytes`,
+  `copied`, `removed`, `compile_seconds`, `seconds`; or `ok: false`, `error`, `missing`).
+- **`ofeliaengine new`** writes `game.build` and adds `/builds/` to the game's `.gitignore`
+  (the team's 5а).
+- **The program** (`engine_app::run`): with no project in its settings and a `data/`
+  folder beside it, that folder is its project and its working folder.
+- **Measured on ref-1** (a game from `ofeliaengine new`, the engine already built in
+  `dev` for another game): the first Build 101 s (the engine in `release`), the next after
+  a change in the engine 15.7 s; the folder 28 MB (the program; data 2 KB and the sound
+  pack); run from another working folder with its window hidden, it loaded its scene with
+  no warning and ran until stopped.
+- **Tests:** the plan (scenes, materials, a glTF's buffer and a percent-encoded image, a
+  `.meta`, scripts always in but their dot-files, the sound pack planned, a missing scene
+  and a missing buffer with what named them); the build file read back as written; the
+  folder written, then again unchanged (nothing copied, a stale file and its folder
+  removed, the made pack kept); the paths, names and cargo's JSON; the command line's
+  options and `--json`'s escaping; `ofeliaengine new`'s `game.build` and `.gitignore`.
+- **Left for G2–G5:** material types and graphs still compile with Slang on the player's
+  machine (G2); models, textures and the rest are copied as they are, not cooked (G3); the
+  strings pack (`loc/` is copied whole for now); the editor's Build (G4); Luau bytecode,
+  the PSO warm-up list, a size report, a zip (G5); the licenses of a game's own crates.io
+  dependencies are not gathered yet.
 
 ## Questions for the team
 
