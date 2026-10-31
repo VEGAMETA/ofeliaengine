@@ -130,11 +130,18 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
     let options = Options {
         kind: args.kind,
         output: args.out.clone(),
+        engine_shaders: Some(PathBuf::from(crate::ENGINE_SHADERS)),
     };
     let quiet = args.json;
     let result = engine_build::build(&args.dir, &file, &options, |step| match step {
         Step::Planned { files } if !quiet => eprintln!("{files} files"),
         Step::Cargo(line) if !quiet => eprintln!("{line}"),
+        Step::Materials { types } if !quiet => {
+            eprintln!(
+                "compiling {types} material type{}",
+                if types == 1 { "" } else { "s" }
+            );
+        }
         _ => {}
     });
     match result {
@@ -142,12 +149,13 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
             if args.json {
                 println!(
                     "{{\"ok\":true,\"folder\":{},\"program\":{},\"kind\":{},\"files\":{},\
-                     \"bytes\":{},\"copied\":{},\"removed\":{},\"compile_seconds\":{:.1},\
-                     \"seconds\":{:.1}}}",
+                     \"material_types\":{},\"bytes\":{},\"copied\":{},\"removed\":{},\
+                     \"compile_seconds\":{:.1},\"seconds\":{:.1}}}",
                     json(&built.folder.to_string_lossy()),
                     json(&built.program.to_string_lossy()),
                     json(built.kind.profile()),
                     built.files,
+                    built.material_types,
                     built.bytes,
                     built.copied,
                     built.removed,

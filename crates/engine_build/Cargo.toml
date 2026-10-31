@@ -14,5 +14,11 @@ workspace = true
 # Feature unification of shared dependencies for build reuse (ADR 0077).
 engine_workspace_hack.workspace = true
 engine_assets.workspace = true
+# The material pack's key (ADR 0113's content hash).
+engine_core.workspace = true
 engine_reflect.workspace = true
 engine_scene.workspace = true
+
+[dev-dependencies]
+# Whether Slang is at hand for the material pack's test.
+engine_shader.workspace = true

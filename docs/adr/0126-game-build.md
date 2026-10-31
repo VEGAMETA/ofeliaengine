@@ -127,11 +127,49 @@
   folder written, then again unchanged (nothing copied, a stale file and its folder
   removed, the made pack kept); the paths, names and cargo's JSON; the command line's
   options and `--json`'s escaping; `ofeliaengine new`'s `game.build` and `.gitignore`.
-- **Left for G2–G5:** material types and graphs still compile with Slang on the player's
-  machine (G2); models, textures and the rest are copied as they are, not cooked (G3); the
+- **Left for G2–G5:** ~~material types and graphs still compile with Slang on the player's
+  machine (G2)~~ (done, below); models, textures and the rest are copied as they are, not cooked (G3); the
   strings pack (`loc/` is copied whole for now); the editor's Build (G4); Luau bytecode,
   the PSO warm-up list, a size report, a zip (G5); the licenses of a game's own crates.io
   dependencies are not gathered yet.
+
+## As built (G2, 2026-10-31): material types compiled ahead
+
+- **The material pack** (`engine_assets::material_pack`, `data/materials.pack`): for each
+  material type the build's material files name, its module's path under the game's
+  folder, its name, its parameters' layout (Slang's reflection of `<type>.Params`) and its
+  fragment entry points' SPIR-V; zstd level 19 behind a header with the build's key, read
+  without the body.
+- **The build** (`engine_build::materials`): before cargo, each typed `.material` in the
+  plan read with its bases as the player reads it; a hand-written module's type, or a
+  graph's module (generated into `.ofelia/cache/graphs/` and added to the plan, so the
+  player finds it unchanged and writes nothing); each type once; a shader outside the
+  game's folder or a material that does not resolve stops the build, naming the file.
+  After the folder: the key (XXH3-128 of the engine's shader folder, the plan's Slang
+  modules and the types) compared with the pack's; another key compiles every type
+  (`SlangMaterialTypes`: layout, then all fragment entry points on up to 8 threads). The
+  engine's shader folder comes from `Options::engine_shaders` (the CLI passes its own).
+  `--json` gains `material_types`.
+- **The player** (`engine_app::Assets`): a `materials.pack` in the project's folder is
+  read with the assets; a type found there is registered with its SPIR-V and its layout
+  (`ForwardRenderer::register_material_type_packed`): its parameters are laid out at once,
+  its pipelines made by the warm-up thread, no compiler thread started. A type not in the
+  pack, or an entry point it lacks, compiles as before, where Slang is at hand.
+- **Measured on ref-1:** the stripes type and a graph's type, 318 fragment entry points,
+  a 696 KB pack in 11.4 s; a type drawn from a pack 4 frames (0.07 s) after the scene
+  loads, against 1.12 s compiling it. A game from `ofeliaengine new` with its cube's
+  material typed: built in 31.1 s (24.9 s cargo, the type in about 6 s), again in 0.4 s
+  (the pack kept); run with no Slang on the machine (neither `VULKAN_SDK` nor the search
+  path), it draws the type with nothing logged, while without the pack it logs "no Slang
+  compiler" and draws the material's look.
+- **Tests:** the pack read back as written (header key alone, damaged and foreign files
+  refused); the plan's materials naming their types once (a variant through its base, a
+  standard material none, a graph's module made and planned, the key following a module's
+  text, a shader outside the folder refused); the types compiled into a pack and a pack of
+  the same key kept; the player drawing a packed type whose module was spoiled.
+- **Left:** every fragment entry point of `forward.slang` is compiled for every type (159
+  each): the PSO record of G5 keeps the ones playtests draw. The key does not hold Slang's
+  own version (a Slang update with no shader change keeps the old pack; delete it).
 
 ## Questions for the team
 

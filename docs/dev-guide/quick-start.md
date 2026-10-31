@@ -167,6 +167,9 @@ ofeliaengine build --ship     the same, built for shipping (slower to build, fas
   the editor do it.
 - **Only what is used goes in:** a file nothing names is left out, and a file named but
   missing stops the build with the file that named it.
+- **Materials of your own types and graphs** are compiled at build time into
+  `data/materials.pack` (the Vulkan SDK is needed where you build, never where players
+  play); they draw from the first frames, with no shader compiling on players' machines.
 - **Again:** files that did not change are kept, so the second build only compiles your
   code (seconds) and copies what changed. `builds/` is in the game's `.gitignore`.
 
