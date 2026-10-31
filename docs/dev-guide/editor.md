@@ -1708,8 +1708,15 @@ unless it says otherwise).
   else where most transitions came in, and the status bar says when a transition now comes
   in somewhere else); those going out now leave `Group`. **Ctrl+Alt+G** on such a state
   takes it apart: its states come back out where it stood. Both are one undo step.
-- **Not yet:** the character's preview in the canvas's corner comes with the next step
-  (ADR 0124's E12-5d-2d).
+- **The character in the corner:** outside Play, the canvas's top right corner shows a
+  character playing the graph as the tab holds it (every edit at once), walking on its
+  spot: the graph's own preview model (its `preview` field), else the selected character
+  playing it, else the first one in the scene. Drag it to turn it. The canvas lights the
+  state it is in (`· the preview: Walk · 0.42 s` on the bar). With nothing selected, each
+  parameter's section has a **preview** row: type or drag a number, click a flag, or click
+  a trigger to fire it; these values move only the preview (never the file, no undo step),
+  and ↺ gives the parameter's own value back. In Play the corner gives way to the game's
+  characters, watched as before.
 
 ## Autosave and the session
 

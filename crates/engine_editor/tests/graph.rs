@@ -1224,6 +1224,29 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
         !bar.contains("Fox:"),
         "nothing watched while editing: {bar}"
     );
+    // The corner (E12-5d-2d-2): the fox playing the tab's copy outside Play, its speed
+    // previewed at 2 (not saved), the canvas lit by it: Idle, then Walk.
+    game.set_graph_preview_param(0, 2.0);
+    let started = Instant::now();
+    loop {
+        frame(&mut player, &mut game, &mut overlay);
+        if game.graph_corner().is_some_and(|c| c > 300)
+            && game.graph_bar().contains("the preview: Walk")
+        {
+            break;
+        }
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "no corner preview: {:?}, {}",
+            game.graph_corner(),
+            game.graph_bar()
+        );
+    }
+    println!(
+        "the corner: {:?} pixels covered; {}",
+        game.graph_corner(),
+        game.graph_bar()
+    );
     // Play: the tab's copy plays (the file would keep the fox idle).
     assert!(game.run_command(player.world_mut(), "play.play"));
     for _ in 0..12 {

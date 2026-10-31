@@ -584,6 +584,28 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2d-2, 2026-10-31): the character in the canvas's corner
+
+- **The corner** (UX note §14, as the material graph's sphere, E10-3f-2): outside Play, an
+  animation graph's canvas shows its character in the top right corner playing the graph
+  as the tab holds it, through the live model preview (E12-5d-2d-1), on its spot, turned
+  by a drag. Its model: the graph's `preview` model file (its first part), else the
+  selected character playing the graph, else the one shown before, else the first in the
+  scene; none, no corner. One live preview at a time: the dock's model preview waits while
+  a graph's corner shows (they share its texture).
+- **The canvas is lit by it** outside Play (`· the preview: Walk · 0.03 s · from Idle 6 %`
+  on the bar), through `Player::preview_graph_now` by the shown machine's node.
+- **Preview values (Unreal's Anim Preview Editor; my choice, said in the report):** with
+  the corner playing, each parameter's section gets a **preview** row: numbers dragged or
+  typed, flags clicked, a trigger's click fires it (`Player::fire_preview_param`); none of
+  it touches the file or the history; ↺ gives the graph's own value back. Values are kept
+  by the parameters' place while the tab is open.
+- **Tests:** the document's (the rows only while previewing; a number, a trigger and ↺
+  change the preview and leave the file as it was); the fox on the Radeon (the corner
+  drawn, 1,146 pixels of the fox, the bar lit `the preview: Walk … from Idle` with its
+  speed previewed at 2, then Play and Stop as before).
+- E12-5d-2 is done, and with it E12.
+
 ## As built (E12-5d-2d-1, 2026-10-31): the model preview plays a graph
 
 - **The engine's half of the canvas's corner preview:** `Player::preview_graph(file)` makes

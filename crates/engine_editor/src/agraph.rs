@@ -339,6 +339,9 @@ pub(crate) enum AnimRow {
     ParamName(usize),
     ParamKind(usize),
     ParamValue(usize),
+    /// Its value in the canvas's corner preview (ADR 0124's E12-5d-2d-2), while one plays:
+    /// not saved, not a step; ↺ gives it the graph's own; a trigger's click fires it.
+    ParamPreview(usize),
     /// A parameter of a kind added.
     AddParam,
 }
@@ -371,6 +374,7 @@ impl AnimRow {
             Self::Inertialize => "inertialize",
             Self::ParamKind(_) => "kind",
             Self::ParamValue(_) => "starts at",
+            Self::ParamPreview(_) => "preview",
             Self::AddParam => "add",
         }
     }
@@ -500,6 +504,12 @@ pub(crate) struct AnimDoc {
     pub(crate) given: Option<u64>,
     /// In Play, the watched character's machine.
     pub(crate) live: Live,
+    /// The corner preview's parameter values (ADR 0124's E12-5d-2d-2), by the parameters'
+    /// place (none: the graph's own), the triggers fired since the app last gave them to
+    /// the player, and whether the preview plays (its rows shown).
+    pub(crate) preview: Vec<Option<f32>>,
+    pub(crate) fired: Vec<u16>,
+    pub(crate) previewing: bool,
 }
 
 impl AnimDoc {
@@ -525,6 +535,9 @@ impl AnimDoc {
             laid_out: None,
             given: None,
             live: Live::default(),
+            preview: Vec::new(),
+            fired: Vec::new(),
+            previewing: false,
         };
         doc.refresh();
         doc
@@ -1025,6 +1038,9 @@ impl AnimDoc {
             if p.kind != ParamKind::Trigger {
                 rows.push(AnimRow::ParamValue(k));
             }
+            if self.previewing {
+                rows.push(AnimRow::ParamPreview(k));
+            }
             sections.push((AnimSection::Param(k), from, rows.len()));
         }
         let from = rows.len();
@@ -1035,6 +1051,33 @@ impl AnimDoc {
     /// The layer shown (ADR 0124's E12-5d-2b).
     pub(crate) fn shown_layer(&self) -> Option<&LayerFile> {
         self.file.layers.get(&self.layer)
+    }
+
+    /// Parameter `k`'s value in the corner preview: the one set there, else its own.
+    pub(crate) fn preview_value(&self, k: usize) -> f32 {
+        self.preview
+            .get(k)
+            .copied()
+            .flatten()
+            .or_else(|| self.param(k).map(|(_, p)| p.value))
+            .unwrap_or(0.0)
+    }
+
+    /// Parameter `k`'s preview value set (whole for an Int, 0 or 1 for a flag), or given
+    /// back to the graph's own (none).
+    pub(crate) fn set_preview(&mut self, k: usize, value: Option<f32>) {
+        let Some(kind) = self.param(k).map(|(_, p)| p.kind) else {
+            return;
+        };
+        if self.preview.len() <= k {
+            self.preview.resize(k + 1, None);
+        }
+        self.preview[k] = value.map(|v| match kind {
+            ParamKind::Int => v.round(),
+            ParamKind::Bool => f32::from(u8::from(v != 0.0)),
+            ParamKind::Trigger => 0.0,
+            ParamKind::Float => v,
+        });
     }
 
     /// The entry's name of the machine the state selected alone plays (where a group made by
@@ -1218,6 +1261,12 @@ impl AnimDoc {
                 Some(ParamKind::Int) => RowLook::Numbers(1, true),
                 _ => RowLook::Numbers(1, false),
             },
+            AnimRow::ParamPreview(k) => match self.param(k).map(|(_, p)| p.kind) {
+                Some(ParamKind::Bool) => RowLook::Check(self.preview_value(k) != 0.0),
+                Some(ParamKind::Trigger) => RowLook::Check(false),
+                Some(ParamKind::Int) => RowLook::Numbers(1, true),
+                _ => RowLook::Numbers(1, false),
+            },
         }
     }
 
@@ -1266,6 +1315,7 @@ impl AnimDoc {
             AnimRow::Exit => one(self.transition().map_or(0.0, |t| t.exit)),
             AnimRow::Offset => one(self.transition().map_or(0.0, |t| t.offset)),
             AnimRow::ParamValue(k) => one(self.param(k).map_or(0.0, |(_, p)| p.value)),
+            AnimRow::ParamPreview(k) => one(self.preview_value(k)),
             AnimRow::LayerWeight => one(self.shown_layer().map_or(1.0, |l| l.weight)),
             AnimRow::MaskWeight => one(self.mask_joint().map_or(1.0, |j| self.mask_weight(j))),
             _ => [0.0; 4],
@@ -1295,6 +1345,7 @@ impl AnimDoc {
                 .param(k)
                 .is_some_and(|(_, p)| p.kind != ParamKind::Float),
             AnimRow::ParamValue(k) => self.param(k).is_some_and(|(_, p)| p.value != 0.0),
+            AnimRow::ParamPreview(k) => self.preview.get(k).copied().flatten().is_some(),
             AnimRow::LayerBlend => self
                 .shown_layer()
                 .is_some_and(|l| l.blend != LayerBlend::Normal),
@@ -1344,7 +1395,8 @@ impl AnimDoc {
                 | AnimRow::Offset
                 | AnimRow::LayerWeight
                 | AnimRow::MaskWeight
-                | AnimRow::ParamValue(_) => graph::value_text(text, &numbers[k..=k]),
+                | AnimRow::ParamValue(_)
+                | AnimRow::ParamPreview(_) => graph::value_text(text, &numbers[k..=k]),
                 AnimRow::LayerName => {
                     text.push_str(self.shown_layer().map_or("", |l| l.name.as_str()));
                 }
@@ -2915,6 +2967,11 @@ impl GraphDoc {
         row: AnimRow,
         values: [f32; 4],
     ) -> Option<(String, String)> {
+        // The preview's value (E12-5d-2d-2): no step.
+        if let AnimRow::ParamPreview(k) = row {
+            self.anim.as_deref_mut()?.set_preview(k, Some(values[0]));
+            return None;
+        }
         let anim = self.anim.as_deref()?;
         let state = anim.inspected_state().map(str::to_owned);
         let transition = anim.inspected_transition().map(str::to_owned);
@@ -3131,6 +3188,21 @@ impl GraphDoc {
     ///
     /// The entry switched off: a machine starts at one of its states.
     pub(crate) fn anim_toggle(&mut self, row: AnimRow) -> Result<Option<Outcome>, &'static str> {
+        // The preview's flag flipped, or its trigger fired (E12-5d-2d-2): no step.
+        if let AnimRow::ParamPreview(k) = row {
+            let Some(anim) = self.anim.as_deref_mut() else {
+                return Ok(None);
+            };
+            match anim.param(k).map(|(_, p)| p.kind) {
+                Some(ParamKind::Trigger) => anim.fired.push(k as u16),
+                Some(ParamKind::Bool) => {
+                    let on = anim.preview_value(k) != 0.0;
+                    anim.set_preview(k, Some(if on { 0.0 } else { 1.0 }));
+                }
+                _ => {}
+            }
+            return Ok(None);
+        }
         let Some(anim) = self.anim.as_deref() else {
             return Ok(None);
         };
@@ -3305,6 +3377,11 @@ impl GraphDoc {
     /// the start of its blend, no condition, a quarter second's blend, priority 0, no exit
     /// time nor offset, both switches off, a number, a starting value of 0.
     pub(crate) fn anim_reset(&mut self, row: AnimRow) -> Option<(String, String)> {
+        // The preview's value given back to the graph's own (E12-5d-2d-2): no step.
+        if let AnimRow::ParamPreview(k) = row {
+            self.anim.as_deref_mut()?.set_preview(k, None);
+            return None;
+        }
         let anim = self.anim.as_deref()?;
         let state = anim.inspected_state().map(str::to_owned);
         let transition = anim.inspected_transition().map(str::to_owned);
@@ -4594,6 +4671,44 @@ mod tests {
             .values()
             .filter(|t| t.from == from && t.to == to)
             .collect()
+    }
+
+    /// ADR 0124's E12-5d-2d-2: while the corner preview plays, each parameter's section has
+    /// a preview row: a number set, a flag flipped, a trigger fired change what the preview
+    /// plays and never the file (no step); ↺ gives the graph's own value back.
+    #[test]
+    fn parameters_preview_values_change_the_preview_and_not_the_file() {
+        let mut d = doc();
+        let rows = |d: &GraphDoc| {
+            let mut rows = Vec::new();
+            let mut sections = Vec::new();
+            anim(d).rows(&mut rows, &mut sections);
+            rows
+        };
+        assert!(
+            !rows(&d).contains(&AnimRow::ParamPreview(0)),
+            "no preview, no row"
+        );
+        anim_mut(&mut d).previewing = true;
+        let shown = rows(&d);
+        // Parameters in their names' order: jump (a trigger), speed.
+        assert!(shown.contains(&AnimRow::ParamPreview(0)));
+        assert!(shown.contains(&AnimRow::ParamPreview(1)));
+        assert_eq!(AnimRow::ParamPreview(1).name(), "preview");
+        let text = anim(&d).file.clone();
+        assert!(
+            d.anim_set_numbers(AnimRow::ParamPreview(1), [2.5, 0.0, 0.0, 0.0])
+                .is_none()
+        );
+        assert_eq!(anim(&d).preview_value(1), 2.5);
+        assert!(anim(&d).changed(AnimRow::ParamPreview(1)));
+        assert_eq!(anim(&d).file, text, "the file untouched");
+        assert!(matches!(d.anim_toggle(AnimRow::ParamPreview(0)), Ok(None)));
+        assert_eq!(anim(&d).fired, [0], "the trigger fired");
+        assert!(d.anim_reset(AnimRow::ParamPreview(1)).is_none());
+        assert_eq!(anim(&d).preview_value(1), 0.0, "the graph's own again");
+        assert!(!anim(&d).changed(AnimRow::ParamPreview(1)));
+        assert_eq!(anim(&d).file, text);
     }
 
     /// ADR 0124's E12-5d-2c-2: Ctrl+G groups the selected states into a machine played by a

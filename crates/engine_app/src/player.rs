@@ -1423,6 +1423,11 @@ impl Player {
         self.assets.hold_preview_param(slot, value);
     }
 
+    /// Trigger `slot` of the previewed graph fired once, at its next tick.
+    pub fn fire_preview_param(&mut self, slot: u16) {
+        self.assets.fire_preview_param(slot);
+    }
+
     /// Where machine node `node` of the previewed graph is (its place among the graph file's
     /// nodes, as [`Self::graph_now_node`]), once the preview plays it.
     pub fn preview_graph_now(&self, node: usize) -> Option<engine_anim::MachineNow<'_>> {
