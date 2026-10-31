@@ -2601,6 +2601,12 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
+- **The RTX's `video_player` golden shot differs since 2026-11-01 ~03:00** (mean FLIP 0.0105,
+  99.9th percentile 0.119; the error spread thinly over the whole scene, not the video), on
+  main as on the branch, 3 of 3 alone, the GPU idle and the driver the same (617.42); it
+  passed in the gates of #505 and #506 two hours before. The change is in the machine,
+  not the code: to look into (the driver's shader cache, a Windows update, the GPU's
+  state after the monitor slept) before re-taking the image.
 - **Flaky under load (2026-10-31): `a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor`**
   (engine_editor `assets`): once in a gate's gpu step the man was let go at y −0.354, not
   on the floor at −0.5; alone it passes (3 of 3). The hold already waits until he stands;
