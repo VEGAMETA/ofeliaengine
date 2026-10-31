@@ -798,6 +798,14 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   then the later entity), on the CPU, at a click only (nothing a frame). Tests: rectangles
   around the pivot and turned; the picks agree with what the sorting
   test draws; the editor names the picked sprite.
-- **Left (E13-1b-6 and later):** picking by the sprites' opaque pixels and their outlines
-  (the rectangle for now; sort groups are not looked at); Ctrl snapping to a tile map's
-  cells (with E13-3); the 2D gizmo's own look.
+- **E13-1b-6:** **picked where the image shows.** `Player::sprite_at` takes a test of
+  the image and the texture coordinates the point falls on (flips applied), asked only of
+  a sprite that would be on top; the editor answers it from a mask it decodes from the
+  image file at the first click on it (one bit a pixel, alpha at least 26 of 255, about
+  10 %, so faint glows let clicks through), decoded again when the file's time changes;
+  an image it cannot decode is picked by its rectangle. The game keeps no image on the
+  CPU. Tests: the mask's threshold and clamping; masks from files, refreshed on change; a
+  clear pixel picks what is under it (both GPUs' sorting test).
+- **Left (E13-1b-7 and later):** sort groups in picking; the selected sprite's outline;
+  Ctrl snapping to a tile map's cells (with E13-3); the 2D gizmo's own look. A slice
+  (E13-2) will pass its rectangle of the image to the same test.
