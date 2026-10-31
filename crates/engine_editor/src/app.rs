@@ -187,6 +187,10 @@ const CLIPS_KEYS: KeyContext = KeyContext::Panel(5);
 /// The Animation tab's keys after a press in it (E12-3a): the arrows step a frame, Home and
 /// End go to the clip's ends, Space plays or stops it.
 const ANIM_KEYS: KeyContext = KeyContext::Panel(6);
+/// An animation graph's canvas's keys while its tab is shown, ahead of a material graph's
+/// (ADR 0124's E12-5d-2c-2): Ctrl+G groups the selected states into a machine, Ctrl+Alt+G
+/// takes one apart, Tab enters one (and comes back out).
+const STATES_KEYS: KeyContext = KeyContext::Panel(7);
 
 /// What a part shows while the selected entities hold different values there.
 const MIXED: &str = "—";
@@ -1245,6 +1249,12 @@ struct CommandIds {
     make_function: CommandId,
     enter_function: CommandId,
     ungroup_function: CommandId,
+    /// Machines on an animation graph's canvas (ADR 0124's E12-5d-2c, the same keys): the
+    /// selected states grouped into one, a state's machine entered (and left), one taken
+    /// apart.
+    group_states: CommandId,
+    enter_machine: CommandId,
+    ungroup_states: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1479,6 +1489,21 @@ fn commands() -> (Commands, CommandIds) {
             "Open the Call's Function (or Go Back)",
         ),
         ungroup_function: c.register("graph.ungroup_function", "Graph", "Ungroup Function"),
+        group_states: c.register(
+            "animation.group_states",
+            "Animation",
+            "Group States into a Machine",
+        ),
+        enter_machine: c.register(
+            "animation.enter_machine",
+            "Animation",
+            "Enter the State's Machine (or Go Back)",
+        ),
+        ungroup_states: c.register(
+            "animation.ungroup_states",
+            "Animation",
+            "Take the Machine Apart",
+        ),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -1781,12 +1806,19 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Alt+G", ids.ungroup_function),
     ]
     .map(|(chord, id)| (chord, id, GRAPH_KEYS));
+    let states = [
+        ("Ctrl+G", ids.group_states),
+        ("Tab", ids.enter_machine),
+        ("Ctrl+Alt+G", ids.ungroup_states),
+    ]
+    .map(|(chord, id)| (chord, id, STATES_KEYS));
     for (chord, id, context) in global
         .chain(tree)
         .chain(dock)
         .chain(clips)
         .chain(anim)
         .chain(code)
+        .chain(states)
         .chain(graph)
     {
         if let Some(chord) = Chord::parse(chord) {
@@ -8647,11 +8679,12 @@ impl Editor {
         } else {
             None
         };
-        let mut list = [KeyContext::Global; 3];
+        let mut list = [KeyContext::Global; 4];
         let mut n = 0;
         for context in [
             panel,
             self.active_script.map(|_| CODE_KEYS),
+            self.anim_graph_shown().map(|_| STATES_KEYS),
             self.active_graph.map(|_| GRAPH_KEYS),
         ]
         .into_iter()
@@ -14797,6 +14830,9 @@ impl Editor {
                 ids.make_function,
                 ids.enter_function,
                 ids.ungroup_function,
+                ids.group_states,
+                ids.enter_machine,
+                ids.ungroup_states,
             ]
             .contains(&id)
     }
@@ -15530,6 +15566,30 @@ impl Editor {
         self.graph_outcome(world, g, outcome);
         if self.active_graph != Some(g) {
             self.show_graph(world, g);
+        }
+    }
+
+    /// "Animation: Group States into a Machine" (Ctrl+G; ADR 0124's E12-5d-2c-2): the selected
+    /// states grouped, as a step; said where transitions now come in at the new machine's
+    /// entry rather than at their own state.
+    fn group_states(&mut self, world: &mut World, g: usize) {
+        let Some((outcome, redirected)) = self.graphs[g].group_states() else {
+            return;
+        };
+        let edited = matches!(outcome, crate::graph::Outcome::Edited { .. });
+        self.graph_outcome(world, g, Some(outcome));
+        if edited && redirected > 0 {
+            let entry = self
+                .graphs
+                .get(g)
+                .and_then(|d| d.anim())
+                .and_then(|a| a.grouped_entry())
+                .unwrap_or_default();
+            let s = if redirected == 1 { "" } else { "s" };
+            self.say(format!(
+                "Grouped: {redirected} transition{s} into its states now come in at {entry}, \
+                 its entry (Tab enters it)"
+            ));
         }
     }
 
@@ -18255,8 +18315,17 @@ impl Editor {
                 self.set_entry_state(world, g);
                 return;
             }
+            if id == ids.group_states && canvas {
+                self.group_states(world, g);
+                return;
+            }
+            if id == ids.ungroup_states && canvas {
+                let outcome = self.graphs[g].ungroup_states();
+                self.graph_outcome(world, g, outcome);
+                return;
+            }
             // Tab: into the selected state's machine, or back out (E12-5d-2c).
-            if id == ids.enter_function && canvas {
+            if [ids.enter_machine, ids.enter_function].contains(&id) && canvas {
                 if let Err(why) = self.graphs[g].anim_tab()
                     && !why.is_empty()
                 {
@@ -18315,6 +18384,14 @@ impl Editor {
             }
             if id == ids.make_function && canvas {
                 self.make_function(world, g);
+                return;
+            }
+            let states = [ids.group_states, ids.enter_machine, ids.ungroup_states];
+            if canvas && states.contains(&id) {
+                self.say(String::from(
+                    "That works on an animation graph's canvas: a material graph groups nodes \
+                     into a function with Ctrl+G",
+                ));
                 return;
             }
             if id == ids.enter_function && canvas {
@@ -43771,6 +43848,94 @@ return Coin
         ed.update(&mut world);
         assert_eq!(anim(&ed).layer_ids.len(), 2);
         assert!(anim(&ed).file.states.contains_key("wave"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-5d-2c-2: on an animation graph's canvas Ctrl+G groups the selected
+    /// states into a machine (its own palette command, not a material graph's function), says
+    /// where a transition now comes in at the group's entry, and is one step undone as one;
+    /// Ctrl+Alt+G takes the group apart again, one step.
+    #[test]
+    fn states_are_grouped_by_ctrl_g_and_taken_apart_by_ctrl_alt_g() {
+        let dir = project("graph-group");
+        std::fs::create_dir_all(dir.join("anim")).unwrap();
+        std::fs::write(
+            dir.join("anim/hero.agraph"),
+            format!(
+                "[agraph version=1 id={}]\n\n\
+                 params[\"speed\"].kind = Float\nparams[\"jump\"].kind = Trigger\n\
+                 layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+                 nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
+                 nodes[\"ci\"].clip = \"Idle\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+                 states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
+                 states[\"idle\"].pose = \"ci\"\n\
+                 states[\"walk\"].at = [300, 0]\nstates[\"walk\"].machine = \"m\"\n\
+                 states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
+                 states[\"run\"].at = [600, 0]\nstates[\"run\"].machine = \"m\"\n\
+                 states[\"run\"].name = \"Run\"\nstates[\"run\"].pose = \"cw\"\n\
+                 transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
+                 transitions[\"t2\"].from = \"\"\ntransitions[\"t2\"].to = \"run\"\n\
+                 transitions[\"t2\"].when = \"jump\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        ed.open_graph(&world, Path::new("anim/hero.agraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).file.states.len(), 3);
+        // The animation canvas's keys come first: Ctrl+G is grouping there.
+        let ctrl_g = Chord::parse("Ctrl+G").unwrap();
+        let contexts = [STATES_KEYS, GRAPH_KEYS];
+        assert_eq!(
+            ed.keymap.lookup(ctrl_g, &contexts),
+            Some(ed.ids.group_states)
+        );
+        assert_eq!(
+            ed.keymap.lookup(ctrl_g, &[GRAPH_KEYS]),
+            Some(ed.ids.make_function)
+        );
+        if let Some(a) = ed.graphs[0].anim.as_deref_mut() {
+            a.selected = [String::from("walk"), String::from("run")].into();
+        }
+        chord(&mut ed, &mut world, &[CTRL, G]);
+        ed.update(&mut world);
+        assert_eq!(ed.history.steps().count(), 1);
+        let a = anim(&ed);
+        assert_eq!(a.file.states.len(), 4);
+        let group = a.selected.iter().next().cloned().unwrap();
+        assert_eq!(a.file.states[&group].name, "Group");
+        let said = ed
+            .message
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default();
+        assert!(
+            said.contains("1 transition into its states now come"),
+            "{said}"
+        );
+        assert!(said.contains("at Walk"), "{said}");
+        // Undone as one; done again.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).file.states.len(), 3);
+        assert_eq!(anim(&ed).file.states["run"].machine, "m");
+        if let Some(a) = ed.graphs[0].anim.as_deref_mut() {
+            a.selected = [String::from("walk"), String::from("run")].into();
+        }
+        chord(&mut ed, &mut world, &[CTRL, G]);
+        ed.update(&mut world);
+        // Ctrl+Alt+G with the group selected: apart, one step.
+        chord(&mut ed, &mut world, &[CTRL, ALT, G]);
+        ed.update(&mut world);
+        let a = anim(&ed);
+        assert_eq!(a.file.states.len(), 3);
+        assert_eq!(a.file.states["walk"].machine, "m");
+        assert_eq!(a.selected.len(), 2);
+        assert_eq!(ed.history.steps().count(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

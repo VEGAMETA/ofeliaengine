@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5d-2c-2, grouping states** (#PR, ADR 0124's as-built; the team's а for the
+    runtime): Ctrl+G puts the selected states into a machine played by a new state (the
+    transitions in come into it, those out leave it, the same ones merged, the entry kept
+    or the most entered; how many now come in elsewhere is said), Ctrl+Alt+G takes it apart,
+    each one step, with the animation canvas's own commands and keys; an exit time out of a
+    state playing a machine waits for the clip inside (it passed at once before).
   - **E12-5d-2c-1, machines inside machines** (#494, ADR 0124's as-built): a state's pose
     can be a machine (its own Idle inside); double-click or Tab enters it, Tab with nothing
     selected comes out, the bar's crumbs name the machines entered; its live state in Play
@@ -1321,9 +1327,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5d-2c-2 and 2d (Ctrl+G grouping states into a machine, the character previewed in
-    the corner), the last of E12; 5a to 5c, 5d-1, 5d-2a, 5d-2b, 5d-2c-1 and 5e are done,
-    and E12-4.
+    E12-5d-2d (the character previewed in the canvas's corner), the last of E12; 5a to 5c,
+    5d-1, 5d-2a, 5d-2b, 5d-2c and 5e are done, and E12-4.
     E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491); E13-1b, the editor's 2D
     view, follows E12. No agents from now on (the owner, 2026-10-30).
   - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а

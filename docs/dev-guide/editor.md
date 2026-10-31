@@ -1702,8 +1702,14 @@ unless it says otherwise).
   **plays** row's `Machine`, or `State: Machine` from Space). Double-click it, or select it
   and press **Tab**, to edit its states; **Tab** with nothing selected comes back out. The
   bar names the machines you are in after the layers' chips; click one to go back to it.
-- **Not yet:** grouping selected states into a machine (Ctrl+G) and the character's
-  preview in the corner come with the next steps (ADR 0124's E12-5d-2).
+- **Grouping states:** select states and press **Ctrl+G** to put them into a machine of
+  their own, played by a new state, `Group`. Transitions between them go inside; those
+  coming in now come into `Group` (its machine starts at the old entry if you grouped it,
+  else where most transitions came in, and the status bar says when a transition now comes
+  in somewhere else); those going out now leave `Group`. **Ctrl+Alt+G** on such a state
+  takes it apart: its states come back out where it stood. Both are one undo step.
+- **Not yet:** the character's preview in the canvas's corner comes with the next step
+  (ADR 0124's E12-5d-2d).
 
 ## Autosave and the session
 

@@ -584,6 +584,46 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2c-2, 2026-10-31): grouping states into a machine and taking it apart
+
+- **Ctrl+G** on an animation graph's canvas groups the selected states of the machine shown
+  into a machine of their own, played by a new state, `Group` (numbered where the name is
+  taken), at their boxes' middle; the new machine's Any State box sits above and left of
+  them. One step, the new state selected.
+  - The transitions between them go inside with them.
+  - Those into them from the rest of the machine (or its Any State) come into `Group`; those
+    out of them leave it; two that end up the same in every part merge into one.
+  - An Any State transition into one of them is also kept inside, as the new machine's Any
+    State's, so the others inside still go there.
+  - The new machine starts where the machine did when its entry is among them (`Group`
+    becomes the entry); else at the state most transitions came into; else at the first in
+    reading order. Transitions that now come in at that entry rather than at their own
+    state are counted, and the status bar says so ("1 transition into its states now comes
+    in at Walk").
+- **Ctrl+Alt+G** takes the selected states playing machines apart, one step: the states come
+  out (renamed where a name is taken, their boxes' top left where the state was), what came
+  into the state goes into its machine's entry, and what left it, with the machine's own
+  Any State transitions, leaves each of its states (not into the state it leaves, nor where
+  the outer Any State already goes there the same way). A machine another state or a layer
+  also plays stays whole (said).
+- **Own commands and keys:** `Animation: Group States into a Machine`, `Enter the State's
+  Machine (or Go Back)` and `Take the Machine Apart`, bound to Ctrl+G, Tab and Ctrl+Alt+G in
+  an animation canvas's own key context ahead of a material graph's (where the same keys
+  make, enter and ungroup functions).
+- **The runtime (team decision 2026-10-31, а):** an exit time on a transition out of a state
+  playing a machine is the exit time of the clip or blend the state that machine is in
+  plays, down the nested machines (`AnimGraph::timed_now`; Unreal's automatic rule reads
+  the most relevant player in the state the same way). Before, it counted as passed at
+  once, so an "at end" transition out of a group would have fired as soon as the group was
+  entered. Keep Phase from such a state takes that clip's fraction too.
+- **Tests:** the runtime's (an exit of 0.5 out of a state playing a machine taken at the
+  33rd tick, half the 1 s clip inside); the document's (three states, two grouped: the
+  group's place, its machine's entry and Any State box, the transitions in, out, merged and
+  kept inside, Tab in and out, Ctrl+Alt+G back: places, entry, copies; the entry grouped
+  alone; a name taken outside renamed; a machine played twice kept whole); the app's (Ctrl+G
+  through the real key path resolves to grouping on an animation canvas and to Make Function
+  on a material one, the status bar's count, Ctrl+Z, Ctrl+Alt+G).
+
 ## As built (E12-5d-2c-1, 2026-10-30): machines inside machines
 
 - **A state can play a machine:** its **plays** row offers `Machine`, and the add search
@@ -604,7 +644,7 @@ allocation with transitions and events every tick; the same events at the same t
   by its place among the graph file's nodes in their ids' order; the canvas, the bar and
   the inspector read the machine shown through it, a layer's or one inside a state.
 - **Grouping the selected states into a machine (Ctrl+G) and taking one apart
-  (Ctrl+Alt+G)** come next (E12-5d-2c-2).
+  (Ctrl+Alt+G)** followed in E12-5d-2c-2.
 - **Tests:** the runtime's (a machine inside Move found by its node while Move plays,
   `Walking` at its time; the layer's machine by its node too; a clip's node none); the
   document's (a pose made a machine, its Idle; Tab in; the crumbs; a state added inside;
