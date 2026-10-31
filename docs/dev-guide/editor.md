@@ -1802,7 +1802,8 @@ so pixel art stays sharp; **Ctrl+0** shows it at 100 %. **F** frames the selecti
 **View: 2D** again goes back to the 3D view where you left it. 3D models are not drawn in
 the 2D view. A scene whose main camera is orthographic opens in the 2D view by itself.
 Drop an image from the FileSystem dock onto the 2D view and it becomes a sprite where you
-let go, on a whole pixel of the art.
+let go, on a whole pixel of the art. In 2D, moves snap by the art's pixels (Shift steps by
+one, Ctrl lands on one), and from 800 % a faint grid shows every pixel.
 
 ## Building the game
 
