@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2d-1, the model preview plays a graph** (#PR, ADR 0124's as-built):
+  - **E12-5d-2d-1, the model preview plays a graph** (#496, ADR 0124's as-built):
     `Player::preview_graph`, `hold_preview_param`, `preview_graph_now`: the live model
     preview plays an animation graph (the editor's copy) at 64 Hz by the frame's time, on
     its spot, drawn every frame it plays; 0 allocations. The canvas's corner next (2d-2).
