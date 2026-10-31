@@ -1774,6 +1774,18 @@ impl ForwardRenderer {
         self.material_types.register_precompiled(desc, entries)
     }
 
+    /// [`Self::register_material_type_precompiled`] with the type's parameters' layout as
+    /// well (a built game's material pack, ADR 0126's G2): neither its pipelines nor its
+    /// parameters wait for Slang.
+    pub fn register_material_type_packed(
+        &mut self,
+        desc: MaterialTypeDesc,
+        entries: &[(String, Vec<u32>)],
+        layout: engine_shader::StructLayout,
+    ) -> MaterialTypeId {
+        self.material_types.register_packed(desc, entries, layout)
+    }
+
     /// Watches the files material types compile from (their modules, `forward.slang` and
     /// what they include) and compiles a type again when one changes: its pipelines in use
     /// keep drawing until their successors are made; a module that does not compile keeps

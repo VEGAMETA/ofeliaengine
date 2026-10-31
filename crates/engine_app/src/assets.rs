@@ -232,6 +232,16 @@ fn project_path(root: &Path, full: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// The material pack of a built game at `root` (ADR 0126's G2), if it has one; one that
+/// cannot be read is said and left (its types compile, where Slang is at hand).
+fn read_material_pack(root: &Path) -> Option<engine_assets::material_pack::MaterialPack> {
+    let path = root.join(engine_assets::material_pack::MATERIAL_PACK);
+    engine_assets::material_pack::MaterialPack::load(&path).unwrap_or_else(|e| {
+        log::error!(target: "engine_app::assets", "{e}");
+        None
+    })
+}
+
 /// Whether a written path names a glTF file (`.glb`, `.gltf`).
 fn is_gltf(path: &str) -> bool {
     Path::new(file_part(path))
@@ -782,6 +792,9 @@ pub struct Assets {
     pending_materials: Vec<PendingMaterial>,
     /// Typed material files' materials (ADR 0120's E10-1b).
     typed: Vec<TypedState>,
+    /// A built game's material types compiled ahead (`materials.pack` in its folder, ADR
+    /// 0126's G2): a type found there is made without Slang.
+    material_pack: Option<engine_assets::material_pack::MaterialPack>,
     /// Typed material files drawn as their looks ([`Self::draw_as_fallback`]).
     as_fallback: HashSet<AssetRef>,
     /// Models waiting for their meshes and materials, given renderers once those are made.
@@ -1396,6 +1409,7 @@ impl Assets {
             compressed_textures: HashSet::new(),
             pending_materials: Vec::new(),
             typed: Vec::new(),
+            material_pack: read_material_pack(&root),
             as_fallback: HashSet::new(),
             waiting: HashSet::new(),
             retry: Vec::new(),
@@ -2522,7 +2536,9 @@ impl Assets {
         self.typed
             .retain(|t| materials.material_type(t.material).is_some());
         let Self {
+            root,
             typed,
+            material_pack,
             as_fallback,
             textures,
             decoding,
@@ -2538,11 +2554,23 @@ impl Assets {
             // Models drawing a stale version of it try again once it settles.
             let was = t.settled();
             let ty = *t.ty.get_or_insert_with(|| {
-                forward.register_material_type(MaterialTypeDesc {
+                let desc = MaterialTypeDesc {
                     name: t.file.type_name.clone(),
                     module: t.file.shader.clone(),
                     type_name: t.file.type_name.clone(),
-                })
+                };
+                // A built game's: compiled ahead, its parameters' layout with it.
+                let packed = material_pack.as_ref().and_then(|pack| {
+                    pack.find(&project_path(root, &t.file.shader)?, &t.file.type_name)
+                });
+                match packed {
+                    Some(packed) => forward.register_material_type_packed(
+                        desc,
+                        &packed.entries,
+                        packed.layout.clone(),
+                    ),
+                    None => forward.register_material_type(desc),
+                }
             });
             if let Some((layout, revision)) = forward.material_params(ty)
                 && t.revision != Some(revision)

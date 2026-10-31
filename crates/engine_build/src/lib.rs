@@ -12,13 +12,15 @@
 //!   written ([`write_folder`]): the program as `<name>.exe`, `data/` with the files (those
 //!   unchanged since the last build kept, those no longer in removed), the game's
 //!   `sounds/` folder as `data/sounds.pack` (made again only when a sound changed; a
-//!   released player reads the pack, ADR 0105), an empty `plugins/` for the vendors' DLLs a
-//!   player supplies (CLAUDE.md §6), and the third parties' notices.
+//!   released player reads the pack, ADR 0105), the material types the material files
+//!   name compiled into `data/materials.pack` ([`materials`], G2: no Slang where the game
+//!   runs), an empty `plugins/` for the vendors' DLLs a player supplies (CLAUDE.md §6), and
+//!   the third parties' notices.
 //! - The player run from that folder takes the `data/` beside it as its project
 //!   (`engine_app::run`).
 //!
-//! G1 of ADR 0126 copies the files as the player reads them while a game is developed; the
-//! cooked packs replace them in G2–G3.
+//! G1 of ADR 0126 copies the files as the player reads them while a game is developed; G2
+//! compiles the material types ahead; the cooked packs of G3 replace the rest.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
@@ -29,6 +31,10 @@ use std::time::Instant;
 
 use engine_reflect::Reflect;
 use engine_scene::{AssetId, LoadError, ValueReport};
+
+pub mod materials;
+
+use engine_assets::material_pack::MATERIAL_PACK;
 
 /// The build file's name in a game's folder.
 pub const BUILD_FILE: &str = "game.build";
@@ -404,6 +410,9 @@ pub struct Options {
     pub kind: Option<Kind>,
     /// Where builds go in place of the file's.
     pub output: Option<PathBuf>,
+    /// The engine's shader folder (`forward.slang`, which material types compile with):
+    /// needed when the game has typed materials.
+    pub engine_shaders: Option<PathBuf>,
 }
 
 /// A step of a build, as it goes: cargo's lines while the game builds, then the files.
@@ -416,6 +425,11 @@ pub enum Step<'a> {
     },
     /// A line cargo printed (`Compiling engine_core …`, a warning).
     Cargo(&'a str),
+    /// Material types compiling into the material pack (G2): how many.
+    Materials {
+        /// Types.
+        types: usize,
+    },
     /// The folder being written: files done of all.
     Writing {
         /// Done.
@@ -436,6 +450,8 @@ pub struct Built {
     pub kind: Kind,
     /// The files in `data/`.
     pub files: usize,
+    /// The material types in its material pack.
+    pub material_types: usize,
     /// Their bytes.
     pub bytes: u64,
     /// Those copied this time (the others were kept).
@@ -463,7 +479,7 @@ pub fn build(
 ) -> Result<Built, BuildError> {
     let started = Instant::now();
     let kind = options.kind.unwrap_or(file.kind);
-    let plan = plan(root, file);
+    let mut plan = plan(root, file);
     if !plan.missing.is_empty() {
         let mut e = BuildError::new(format!(
             "{} file{} named but not found",
@@ -473,6 +489,19 @@ pub fn build(
         e.missing = plan.missing;
         return Err(e);
     }
+    // The material types, before cargo: a material that cannot be resolved stops the build
+    // at once.
+    let types = materials::material_types(root, &mut plan)?;
+    let shaders = if types.is_empty() {
+        None
+    } else {
+        plan.made.insert(String::from(MATERIAL_PACK));
+        Some(options.engine_shaders.as_deref().ok_or_else(|| {
+            BuildError::new(
+                "the game has material types, and the engine's shader folder is not known",
+            )
+        })?)
+    };
     tell(Step::Planned {
         files: plan.files.len(),
     });
@@ -492,11 +521,20 @@ pub fn build(
     if plan.made.contains(SOUND_PACK) {
         sound_pack(&root.join(SOUNDS), &folder.join("data").join(SOUND_PACK))?;
     }
+    if let Some(shaders) = shaders {
+        let key = materials::material_key(root, shaders, &plan, &types);
+        let pack = folder.join("data").join(MATERIAL_PACK);
+        if engine_assets::material_pack::MaterialPack::read_key(&pack) != Some(key) {
+            tell(Step::Materials { types: types.len() });
+            materials::material_pack(root, shaders, &types, key, &pack)?;
+        }
+    }
     Ok(Built {
         program: folder.join(format!("{}.exe", folder_name(&file.name))),
         folder,
         kind,
         files: plan.files.len(),
+        material_types: types.len(),
         bytes: written.bytes,
         copied: written.copied,
         removed: written.removed,
@@ -724,14 +762,14 @@ fn remove_empty(dir: &Path) {
 mod tests {
     use super::*;
 
-    fn project(name: &str) -> PathBuf {
+    pub(crate) fn project(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ofelia-build-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn write(root: &Path, path: &str, text: &str) {
+    pub(crate) fn write(root: &Path, path: &str, text: &str) {
         let full = root.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
         std::fs::write(full, text).unwrap();

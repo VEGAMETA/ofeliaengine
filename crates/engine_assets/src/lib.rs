@@ -25,6 +25,7 @@ pub mod graph_module;
 pub mod hdr;
 mod lod;
 pub mod material_file;
+pub mod material_pack;
 pub mod meshlet;
 pub mod navigation;
 pub mod pack;

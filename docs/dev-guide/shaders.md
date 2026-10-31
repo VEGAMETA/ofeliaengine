@@ -12,7 +12,9 @@ when you save a file.
 - To use a different Slang build, set `ENGINE_SLANG_LIBRARY` to the full path of
   `slang-compiler.dll`.
 
-Players never need the SDK: games ship precompiled SPIR-V.
+Players never need the SDK: games ship precompiled SPIR-V. Your material types and graphs
+are compiled when you build the game (`ofeliaengine build`) into its `data/materials.pack`,
+which its player reads instead of compiling them (ADR 0126).
 
 ## 2. Shaders and modules
 

@@ -3918,3 +3918,161 @@ fn a_model_preview_plays_an_animation_graph() {
     player.set_model_preview(None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A built game's material pack (ADR 0126's G2): its type compiled ahead, its module then
+/// spoiled so that nothing could compile it; the player draws the type all the same, its
+/// parameters laid out by the pack's layout, nothing waiting on Slang.
+#[test]
+fn a_built_games_material_pack_draws_its_type_without_compiling() {
+    use engine_assets::material_file::{MaterialTypeBuilder as _, SlangMaterialTypes};
+    use engine_assets::material_pack::{MATERIAL_PACK, MaterialPack, PackedType};
+    let dir = std::env::temp_dir().join(format!("ofelia-material-pack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["materials", "scenes"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let module = dir.join("materials/stripes.slang");
+    std::fs::write(
+        &module,
+        include_str!("../../../tests/golden/materials/stripes.slang"),
+    )
+    .unwrap();
+    let (material_id, module_id) = (AssetId::new(), AssetId::new());
+    std::fs::write(
+        dir.join("materials/stripes.material"),
+        format!(
+            "[material version=2 id={material_id}]\n\nshader = asset(\"materials/stripes.slang\", \
+             {module_id})\ntype = \"StripesMaterial\"\nnumbers[\"frequency\"] = 0.01\n\
+             numbers[\"roughness\"] = 0.5\nvectors[\"color_a\"] = [0.9, 0.05, 0.05, 1]\n\
+             vectors[\"color_b\"] = [0.9, 0.05, 0.05, 1]\nlook = Own\n\
+             base_color = [0.05, 0.8, 0.05, 1]\n"
+        ),
+    )
+    .unwrap();
+    // The pack, as `ofeliaengine build` makes it; then the module spoiled.
+    let Ok(mut builder) = SlangMaterialTypes::new(std::path::Path::new(
+        engine_render::forward::ENGINE_SHADER_DIR,
+    )) else {
+        println!("skipping: no Slang to make the pack with");
+        return;
+    };
+    let pack = MaterialPack {
+        key: 1,
+        types: vec![PackedType {
+            module: String::from("materials/stripes.slang"),
+            type_name: String::from("StripesMaterial"),
+            layout: builder.layout(&module, "StripesMaterial").unwrap(),
+            entries: builder.entries(&module, "StripesMaterial").unwrap(),
+        }],
+    };
+    std::fs::write(dir.join(MATERIAL_PACK), pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&module, "this is not Slang").unwrap();
+
+    let material = AssetRef::file(material_id);
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Striped"),
+        Transform::IDENTITY,
+        Model::new(builtin::CUBE, material),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let eye = Vec3::new(2.0, 1.2, 3.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(eye, Vec3::ZERO, Vec3::Y)),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(material, "materials/stripes.material");
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+
+    let (width, height) = (320u32, 180u32);
+    let settings = PlayerSettings {
+        title: String::from("material pack test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let started = Instant::now();
+    let mut frames = 0;
+    loop {
+        player.frame(&mut game).unwrap();
+        frames += 1;
+        let typed = {
+            let world = player.world_mut();
+            let mut names = QueryState::<(Entity, &Name)>::new(world);
+            let e = names
+                .iter_readonly(world)
+                .find(|(_, n)| n.as_str() == "Striped")
+                .map(|(e, _)| e)
+                .unwrap();
+            world.get::<MeshRenderer>(e).unwrap().material
+        };
+        let ready = player
+            .setup()
+            .materials
+            .material_type(typed)
+            .is_some_and(|t| t != MaterialTypeId::GLTF)
+            && player.renderer().forward().material_types_pending() == 0;
+        if ready && frames > 3 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "not drawn with its type after {frames} frames"
+        );
+    }
+    let rgba = player.capture(&mut game).unwrap().unwrap();
+    let i = (((height / 2) * width + width / 2) * 4) as usize;
+    let [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from);
+    assert!(
+        r > 1.5 * g && r > 1.5 * b,
+        "its type from the pack: {r} {g} {b}"
+    );
+    assert_eq!(player.assets().problem(material), None);
+    println!(
+        "drawn with its packed type after {frames} frames, {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}

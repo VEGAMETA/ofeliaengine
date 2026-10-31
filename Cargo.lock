@@ -377,8 +377,10 @@ name = "engine_build"
 version = "0.0.0"
 dependencies = [
  "engine_assets",
+ "engine_core",
  "engine_reflect",
  "engine_scene",
+ "engine_shader",
  "engine_workspace_hack",
 ]
 

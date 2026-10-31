@@ -57,7 +57,7 @@ pub struct MaterialTypeDesc {
 }
 
 /// The engine's own shader folder: `forward.slang` and its modules (types compile from
-/// it at run time; shipped games will carry precompiled SPIR-V, ADR 0092).
+/// it at run time; a built game carries their SPIR-V in its material pack, ADR 0126).
 pub const ENGINE_SHADER_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders");
 
 /// How long a changed file must stay unchanged before its types compile again: editors
@@ -561,6 +561,24 @@ impl MaterialTypes {
                 .spirv
                 .entry(name)
                 .or_insert_with(|| Spirv::Ready(Arc::from(spirv.as_slice())));
+        }
+        ty
+    }
+
+    /// [`Self::register_precompiled`] with its parameters' layout too (a built game's
+    /// material pack, ADR 0126's G2): nothing about it is compiled or reflected while the
+    /// pack has what frames draw it with.
+    pub(crate) fn register_packed(
+        &mut self,
+        desc: MaterialTypeDesc,
+        entries: &[(String, Vec<u32>)],
+        layout: StructLayout,
+    ) -> MaterialTypeId {
+        let ty = self.register_precompiled(desc, entries);
+        let entry = &mut self.types[usize::from(ty.0) - 1];
+        if matches!(entry.params, Params::NotAsked) {
+            entry.params = Params::Ready(layout);
+            entry.params_revision = entry.params_revision.wrapping_add(1);
         }
         ty
     }

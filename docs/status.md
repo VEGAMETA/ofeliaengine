@@ -883,6 +883,13 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E14 G2, material types compiled at build time** (#PR, ADR 0126's as-built G2):
+    `data/materials.pack` (`engine_assets::material_pack`: each type's layout and
+    fragment SPIR-V, keyed by a hash of the engine's shaders and the game's modules),
+    made by `engine_build::materials` from the typed materials and graphs the build
+    reaches, read by the player so no Slang is needed where the game runs; a typed cube
+    drawn by a built game on a machine with no Slang, 0.07 s after load against 1.12 s
+    compiling; the pack kept when nothing changed (a rebuild in 0.4 s).
   - **E14 G1, `ofeliaengine build`** (#499, ADR 0126's as-built; ADR accepted, the team's
     1а–5а): the `engine_build` crate (the build file, the walk from the scenes to every
     file they reach, cargo in `release` or `shipping`, the folder with `data/`, the sound
