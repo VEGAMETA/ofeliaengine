@@ -17,6 +17,11 @@
 //! "OFDD"  u32 version  u32 entries, each: u128 key, u8 kind bytes, kind, u64 offset,
 //!         u64 bytes;  then the entries' bytes
 //! ```
+//!
+//! A pack also names its images' contents (G3b): an entry of kind `source` keyed by an
+//! image's path under the pack's folder ([`source_key`]) holds the hash of its bytes, so
+//! its compressed texture is found without the image ([`DerivedDataCache::packed_texture`])
+//! and a build can leave the image out.
 
 use crate::texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress};
 use crate::texture_import::{ImageError, TextureUsage, build_mips, decode_image};
@@ -194,6 +199,18 @@ impl DerivedDataCache {
         Some(names)
     }
 
+    /// The compressed texture for `usage` of the image file `file`, found through the
+    /// pack's record of its content (a built game whose image was left out); `None` from a
+    /// directory cache, or for an image the pack does not name.
+    pub fn packed_texture(&self, file: &Path, usage: TextureUsage) -> Option<EncodedTexture> {
+        let folder = self.pack.as_ref().and(self.dir.parent())?;
+        let path = path_under(folder, file)?;
+        let hash = self.get(source_key(&path), SOURCE_KIND)?;
+        let content = u128::from_le_bytes(hash.get(..16)?.try_into().ok()?);
+        self.get(texture_key_of(content, usage), TEXTURE_KIND)
+            .and_then(|bytes| texture_from_bytes(&bytes))
+    }
+
     /// The cache directory (a pack's path for a pack).
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -256,6 +273,11 @@ const TEXTURE_MAGIC: &[u8; 8] = b"ENGTEX01";
 
 /// The cache key of `encoded` (an image file) imported for `usage`.
 pub fn texture_key(encoded: &[u8], usage: TextureUsage) -> u128 {
+    texture_key_of(content_hash128(encoded), usage)
+}
+
+/// [`texture_key`] of an image whose bytes hash to `content` (`content_hash128`).
+pub fn texture_key_of(content: u128, usage: TextureUsage) -> u128 {
     let mut h = StableHasher::new();
     // 2: the file's bytes by `content_hash128` (ADR 0113).
     h.write_str("engine texture 2");
@@ -271,8 +293,36 @@ pub fn texture_key(encoded: &[u8], usage: TextureUsage) -> u128 {
         TextureUsage::Data => h.write_str("data"),
         TextureUsage::Normal => h.write_str("normal"),
     }
-    h.write(&content_hash128(encoded).to_le_bytes());
+    h.write(&content.to_le_bytes());
     h.finish()
+}
+
+/// Entry kind of an image's content hash in a pack.
+pub const SOURCE_KIND: &str = "source";
+
+/// The key of the image at `path` (under a game's folder, `/` between folders) in a pack's
+/// `source` entries.
+pub fn source_key(path: &str) -> u128 {
+    let mut h = StableHasher::new();
+    h.write_str("engine source 1");
+    h.write_str(path);
+    h.finish()
+}
+
+/// `file` as a path under `base`, `/` between folders, `..` resolved; `None` outside it.
+pub fn path_under(base: &Path, file: &Path) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for part in file.strip_prefix(base).ok()?.components() {
+        match part {
+            std::path::Component::Normal(p) => parts.push(p.to_string_lossy().into_owned()),
+            std::path::Component::ParentDir => {
+                parts.pop()?;
+            }
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Serializes an encoded texture as a cache entry.

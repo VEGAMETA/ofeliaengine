@@ -964,9 +964,10 @@ fn previews_of_a_model_and_a_material_are_drawn_and_read_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A built game (ADR 0126's G3a): its textures compressed at build time into
-/// `derived.pack`, which its player reads as its cache: loaded compressed at once, nothing
-/// compressed while it runs, nothing written beside it.
+/// A built game (ADR 0126's G3a, G3b): its textures compressed at build time into
+/// `derived.pack`, which its player reads as its cache, the image file it stands in for
+/// left out: loaded compressed at once, nothing compressed while it runs, nothing written
+/// beside it.
 #[test]
 fn a_built_games_derived_pack_gives_its_textures_compressed() {
     let dir = std::env::temp_dir().join(format!("ofelia-derived-pack-{}", std::process::id()));
@@ -995,6 +996,12 @@ fn a_built_games_derived_pack_gives_its_textures_compressed() {
     .unwrap();
     assert_eq!((derived.textures, derived.models), (2, 2));
     std::fs::remove_dir_all(dir.join("staging")).unwrap();
+    // The image file the pack stands in for left out, as the build leaves it out (G3b).
+    assert_eq!(
+        derived.left_out.iter().collect::<Vec<_>>(),
+        ["props/textures/paint.png"]
+    );
+    std::fs::remove_file(dir.join("props/textures/paint.png")).unwrap();
     let settings = PlayerSettings {
         title: String::from("derived pack test"),
         window: Window::Offscreen {
