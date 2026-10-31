@@ -596,9 +596,22 @@ pub fn build(
     for image in &derived.left_out {
         plan.files.remove(image);
     }
+    // Scripts as Luau bytecode (G5c): compiled now, so a script that does not compile
+    // stops the build, naming its line; written once the folder is.
+    let scripts = compile_scripts(root, &mut plan)?;
     let written = write_folder(root, &plan, &program, &file.name, &folder, &mut tell)?;
     if plan.made.contains(SOUND_PACK) {
         sound_pack(&root.join(SOUNDS), &folder.join("data").join(SOUND_PACK))?;
+    }
+    for (path, code) in &scripts {
+        let at = folder.join("data").join(path);
+        if std::fs::read(&at).ok().as_deref() != Some(code.as_slice()) {
+            if let Some(parent) = at.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&at, code)
+                .map_err(|e| BuildError::new(format!("{}: {e}", at.display())))?;
+        }
     }
     if let Some(shaders) = shaders {
         let key = materials::material_key(root, shaders, &plan, &types);
@@ -817,6 +830,34 @@ fn sound_pack(folder: &Path, pack: &Path) -> Result<(), BuildError> {
     engine_assets::sounds::write_sound_pack(folder, pack, SOUND_LEVEL)
         .map(|_| ())
         .map_err(|e| BuildError::new(format!("{}: {e}", pack.display())))
+}
+
+/// The plan's Luau scripts compiled as a built game ships them
+/// (`engine_script::compile_shipped`): taken from the files copied, made in their place.
+/// Type definitions (`.d.luau`) are left as they are.
+///
+/// # Errors
+///
+/// A script that cannot be read or does not compile, with its path and line.
+fn compile_scripts(root: &Path, plan: &mut Plan) -> Result<Vec<(String, Vec<u8>)>, BuildError> {
+    let scripts: Vec<String> = plan
+        .files
+        .iter()
+        .filter(|f| extension(f) == "luau" && !f.ends_with(".d.luau"))
+        .cloned()
+        .collect();
+    let settings = engine_script::ScriptSettings::default();
+    let mut out = Vec::with_capacity(scripts.len());
+    for path in scripts {
+        let source = std::fs::read_to_string(root.join(&path))
+            .map_err(|e| BuildError::new(format!("{path}: {e}")))?;
+        let code = engine_script::compile_shipped(&source, &settings)
+            .map_err(|e| BuildError::new(format!("{path}: {e}")))?;
+        plan.files.remove(&path);
+        plan.made.insert(path.clone());
+        out.push((path, code));
+    }
+    Ok(out)
 }
 
 /// The file `<folder's name>.<extension>` beside `folder`.
@@ -1077,6 +1118,47 @@ mod tests {
                 },
             ]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Scripts compiled: taken from the files, made in their place; one that does not
+    /// compile names itself.
+    #[test]
+    fn scripts_ship_as_bytecode() {
+        let root = project("scripts");
+        write(
+            &root,
+            "scripts/door.luau",
+            "return { open = function() return 1 end }
+",
+        );
+        write(
+            &root,
+            "scripts/types.d.luau",
+            "declare x: number
+",
+        );
+        let mut plan = Plan::default();
+        for f in ["scripts/door.luau", "scripts/types.d.luau"] {
+            plan.files.insert(String::from(f));
+        }
+        let scripts = compile_scripts(&root, &mut plan).unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert!(engine_script::split_shipped(&scripts[0].1).is_some());
+        assert!(plan.made.contains("scripts/door.luau"));
+        assert!(!plan.files.contains("scripts/door.luau"));
+        assert!(plan.files.contains("scripts/types.d.luau"));
+        write(
+            &root,
+            "scripts/door.luau",
+            "return {
+  open = = 1
+}
+",
+        );
+        plan.files.insert(String::from("scripts/door.luau"));
+        let e = compile_scripts(&root, &mut plan).unwrap_err();
+        assert!(e.what.starts_with("scripts/door.luau: "), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

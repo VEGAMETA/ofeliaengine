@@ -172,6 +172,8 @@ ofeliaengine build --zip      and zipped beside it: builds/<name>.zip
   the editor do it.
 - **Only what is used goes in:** a file nothing names is left out, and a file named but
   missing stops the build with the file that named it.
+- **Scripts ship as Luau bytecode**, compiled at build time: a script that does not compile
+  stops the build at its line, and players get no source.
 - **Materials of your own types and graphs** are compiled at build time into
   `data/materials.pack` (the Vulkan SDK is needed where you build, never where players
   play); they draw from the first frames, with no shader compiling on players' machines.

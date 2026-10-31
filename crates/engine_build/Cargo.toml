@@ -18,6 +18,8 @@ engine_assets.workspace = true
 engine_core.workspace = true
 engine_reflect.workspace = true
 engine_scene.workspace = true
+# Scripts compiled to Luau bytecode (ADR 0126's G5c).
+engine_script.workspace = true
 
 [dev-dependencies]
 # Whether Slang is at hand for the material pack's test.

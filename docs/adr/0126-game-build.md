@@ -292,7 +292,26 @@ derived data, at load in the editor), and the paths API.
   `tar.exe -a` (bsdtar, in System32 since Windows 10 1803), so no zip dependency.
   `--json` gains `zip`.
 - **Tests:** a folder's report by part and by file; the folder zipped (a `PK` file).
-- **Left (G5c):** Luau scripts as bytecode.
+- **Left (G5c):** Luau scripts as bytecode (below).
+
+## As built (G5c, 2026-11-01): scripts as Luau bytecode
+
+- **The shipped script** (`engine_script::compile_shipped`): `"OFLUAUBC"`, the length and
+  text of what it requires (its `require("path")` calls as lines, found by
+  `engine_script::requires`, the scanner the player orders modules by, moved there from
+  `engine_app`), then its Luau bytecode (optimization 2, debug level 2: errors keep their
+  lines). Written in place of the `.luau` file, under the same path.
+- **The build** compiles every `.luau` the plan has (`.d.luau` type files left as they are)
+  before the folder is written: a script that does not compile stops the build, naming its
+  file and line.
+- **The player** reads a script file's bytes (`engine_app::scripts::read_script`): a shipped
+  one gives its requires to order the modules and its bytecode to
+  `ScriptVm::load_module_bytecode` (`ChunkMode::Binary`); source loads as before.
+- **Tests:** a shipped script keeps its requires (a commented one skipped) and runs; a
+  compile error names its line; scripts taken from the copied files and made in their
+  place, a type file kept; two shipped scripts, one requiring the other, run in order.
+- **ADR 0126 is done** but for what moved: the navigation bake (E14's navigation settings)
+  and the pipelines' warm-up at load.
 
 ## Questions for the team
 
