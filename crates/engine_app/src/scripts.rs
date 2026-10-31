@@ -618,6 +618,8 @@ pub struct Scripts {
     /// Each module's text as it last ran, which runs again when a module it requires is
     /// reloaded.
     texts: HashMap<String, Rc<str>>,
+    /// A built game's shipped scripts' bytecode (ADR 0126's G5c), until each is loaded.
+    shipped: HashMap<String, Vec<u8>>,
     /// The project's modules as `require` finds them (ADR 0114 E7-5b), and what each
     /// requires by string, by module.
     modules: Rc<RefCell<script_require::Modules>>,
@@ -765,6 +767,7 @@ impl Scripts {
             reported: HashSet::new(),
             sources: HashMap::new(),
             texts: HashMap::new(),
+            shipped: HashMap::new(),
             modules,
             needs: BTreeMap::new(),
             heard: (0, 0),
@@ -813,8 +816,13 @@ impl Scripts {
                 .replace('\\', "/");
             let shown = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
             scripts.files.insert(module.clone(), shown.clone());
-            match std::fs::read_to_string(&file) {
-                Ok(s) => texts.push((module, s)),
+            match read_script(&file) {
+                Ok((s, code)) => {
+                    if let Some(code) = code {
+                        scripts.shipped.insert(module.clone(), code);
+                    }
+                    texts.push((module, s));
+                }
                 Err(e) => log::error!(target: "script", "{}: {e}", shown.display()),
             }
         }
@@ -912,7 +920,10 @@ impl Scripts {
             .unwrap_or(file)
             .to_string_lossy()
             .replace('\\', "/");
-        let source = std::fs::read_to_string(file).map_err(|e| format!("{shown}: {e}"))?;
+        let (source, code) = read_script(file).map_err(|e| format!("{shown}: {e}"))?;
+        if let Some(code) = code {
+            self.shipped.insert(module.clone(), code);
+        }
         self.files.insert(module.clone(), PathBuf::from(&shown));
         if let Some(mut files) = self.vm.lua().app_data_mut::<Files>() {
             files.0.insert(module.clone(), shown);
@@ -937,7 +948,10 @@ impl Scripts {
     fn load_module(&mut self, world: &mut World, module: &str, source: &str) {
         let lua = self.vm.lua();
         lua.set_app_data(Loading::default());
-        let loaded = self.vm.load_module(module, source);
+        let loaded = match self.shipped.remove(module) {
+            Some(code) => self.vm.load_module_bytecode(module, &code),
+            None => self.vm.load_module(module, source),
+        };
         let Loading { declared, systems } = self
             .vm
             .lua()
@@ -4071,6 +4085,17 @@ fn set_field(
     Ok(())
 }
 
+/// A script file's text and, for a built game's shipped script (ADR 0126's G5c), its
+/// bytecode: the text then its requires alone, which order the modules.
+fn read_script(file: &Path) -> Result<(String, Option<Vec<u8>>), String> {
+    let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+    if let Some((needs, code)) = engine_script::split_shipped(&bytes) {
+        return Ok((needs.to_owned(), Some(code.to_vec())));
+    }
+    String::from_utf8(bytes)
+        .map(|text| (text, None))
+        .map_err(|_| String::from("not UTF-8 text"))
+}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -5493,6 +5518,37 @@ return Npc
         scripts.tick(&mut world, 0.1);
         assert_eq!(read_f32(&world, &scripts, e, "Coin", "version"), 2.0);
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A built game's scripts as bytecode (ADR 0126's G5c): ordered by the requires their
+    /// files carry, run as from source.
+    #[test]
+    fn shipped_scripts_run_in_their_requires_order() {
+        let coin = r#"local Wallet = require("./wallet")
+local Coin = component("Coin", { version = 0 })
+function Coin.on_tick(self, dt)
+    self.version = Wallet.version
+end
+return Coin
+"#;
+        let wallet = "local Wallet = component(\"Wallet\", { coins = 0 })\nWallet.version = 3\nreturn Wallet\n";
+        let dir = project("shipped", &[("coin.luau", ""), ("wallet.luau", "")]);
+        let settings = engine_script::ScriptSettings::default();
+        for (file, source) in [("coin.luau", coin), ("wallet.luau", wallet)] {
+            let shipped = engine_script::compile_shipped(source, &settings).unwrap();
+            std::fs::write(dir.join("scripts").join(file), shipped).unwrap();
+        }
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let e = world.spawn((Transform::IDENTITY,));
+        assert!(
+            scripts.add(&mut world, e, "Coin"),
+            "Coin loaded from bytecode"
+        );
+        scripts.tick(&mut world, 0.1);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        assert_eq!(read_f32(&world, &scripts, e, "Coin", "version"), 3.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

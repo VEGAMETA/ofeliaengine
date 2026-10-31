@@ -883,6 +883,10 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E14 G5c, scripts as Luau bytecode** (#507, ADR 0126's as-built G5c; ADR 0126 done
+    but for the navigation bake and the warm-up): `engine_script::compile_shipped` (its
+    requires ahead of the bytecode), the build compiling every `.luau`, the player loading
+    bytecode with `load_module_bytecode`; the require scanner moved to `engine_script`.
   - **E14 G5b, the size report and the zip** (#506, ADR 0126's as-built G5b):
     `<folder>.report.txt` beside every build (by part, the largest files), `--zip` and
     Build: Zip the Last Build through Windows' `tar.exe` (no dependency).
@@ -2597,6 +2601,12 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
+- **The RTX's `video_player` golden shot differs since 2026-11-01 ~03:00** (mean FLIP 0.0105,
+  99.9th percentile 0.119; the error spread thinly over the whole scene, not the video), on
+  main as on the branch, 3 of 3 alone, the GPU idle and the driver the same (617.42); it
+  passed in the gates of #505 and #506 two hours before. The change is in the machine,
+  not the code: to look into (the driver's shader cache, a Windows update, the GPU's
+  state after the monitor slept) before re-taking the image.
 - **Flaky under load (2026-10-31): `a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor`**
   (engine_editor `assets`): once in a gate's gpu step the man was let go at y −0.354, not
   on the floor at −0.5; alone it passes (3 of 3). The hold already waits until he stands;

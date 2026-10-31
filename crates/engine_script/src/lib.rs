@@ -50,6 +50,9 @@
 
 pub use mlua;
 
+mod shipped;
+pub use shipped::{SHIPPED_MAGIC, compile_shipped, requires, split_shipped};
+
 pub mod debug;
 pub use debug::{
     BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Logged, Place, Resume,
@@ -377,6 +380,16 @@ impl ScriptVm {
     /// table and its `on_reload(old)` function is called; if the new code fails to
     /// compile or to run, the old version stays loaded.
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), ScriptError> {
+        self.load_chunk(name, source.as_bytes(), false)
+    }
+
+    /// [`Self::load_module`] from Luau bytecode (a built game's shipped script,
+    /// [`split_shipped`]).
+    pub fn load_module_bytecode(&mut self, name: &str, code: &[u8]) -> Result<(), ScriptError> {
+        self.load_chunk(name, code, true)
+    }
+
+    fn load_chunk(&mut self, name: &str, source: &[u8], binary: bool) -> Result<(), ScriptError> {
         engine_profiler::zone!("script::load_module");
         let state = match self.modules.get(name) {
             Some(m) => m.state.clone(),
@@ -389,6 +402,11 @@ impl ScriptVm {
             .lua
             .load(source)
             .set_name(format!("={name}"))
+            .set_mode(if binary {
+                mlua::chunk::ChunkMode::Binary
+            } else {
+                mlua::chunk::ChunkMode::Text
+            })
             .set_environment(env);
         let function = chunk.into_function().map_err(|e| compile_error(name, &e))?;
         // Its breakpoints before it runs: its top level and the closures it makes have them.
