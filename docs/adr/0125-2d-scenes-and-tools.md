@@ -791,6 +791,13 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   2D view drew in perspective); a test checks it. **The gizmo is 2D as it is:** in the
   orthographic view the z arrow points at the eye and is left out (an axis seen end-on),
   the x and y arrows, the square between them and the ring about z remain.
-- **Left (E13-1b-5 and later):** Ctrl snapping to a tile map's cells (with E13-3); the 2D
-  gizmo's own look (x and y arrows, the square,
-  the ring about z); picking sprites by their pixels and their outlines.
+- **E13-1b-5:** **sprites picked by a click** in the 2D view. Sprites are drawn by the 2D
+  pass, not the pick pass, so a pick that found nothing there asks the player for the
+  sprite under its pixel (`Player::sprite_at`, a point on XY): the one whose rectangle
+  holds it and that is drawn on top there (layer, then the layer's order or y-sorting,
+  then the later entity), on the CPU, at a click only (nothing a frame). Tests: rectangles
+  around the pivot and turned; the picks agree with what the sorting
+  test draws; the editor names the picked sprite.
+- **Left (E13-1b-6 and later):** picking by the sprites' opaque pixels and their outlines
+  (the rectangle for now; sort groups are not looked at); Ctrl snapping to a tile map's
+  cells (with E13-3); the 2D gizmo's own look.

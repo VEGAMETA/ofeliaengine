@@ -1804,7 +1804,9 @@ the 2D view. A scene whose main camera is orthographic opens in the 2D view by i
 Drop an image from the FileSystem dock onto the 2D view and it becomes a sprite where you
 let go, on a whole pixel of the art. In 2D, moves snap by the art's pixels (Shift steps by
 one, Ctrl lands on one), and from 800 % a faint grid shows every pixel. An amber frame
-shows what the scene's game camera sees.
+shows what the scene's game camera sees. Click a sprite to select it: the one drawn on top
+where you click (by its rectangle for now, so a click on a transparent corner still takes
+it).
 
 ## Building the game
 

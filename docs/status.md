@@ -883,6 +883,9 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E13-1b-5, sprites picked by a click** (#513): a pick that finds nothing in the 2D
+    view takes the sprite on top under the pixel (`Player::sprite_at`, by rectangles, on
+    the CPU at a click).
   - **E13-1b-4, the game camera's frame** (#512): the main orthographic camera's
     rectangle in the 2D view; fix: the editor's 2D camera now orthographic (#509 set only
     its height, so the view drew in perspective).

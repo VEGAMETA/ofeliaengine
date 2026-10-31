@@ -372,6 +372,42 @@ impl Sprites {
         }
     }
 
+    /// The sprite whose rectangle holds `point` (on the XY plane), the one drawn over the
+    /// others there (the highest layer, then the layer's order or y-sorting, then the later entity; sort
+    /// groups are not looked at): the editor's
+    /// 2D picking (ADR 0125's E13-1b). Sprites whose image is not made yet are passed over.
+    pub(crate) fn sprite_at(
+        &mut self,
+        world: &World,
+        assets: &mut Assets,
+        point: Vec2,
+    ) -> Option<Entity> {
+        let mut best: Option<((i16, f32, u32), Entity)> = None;
+        let Self { drawn, sorting, .. } = self;
+        drawn.for_each_readonly(world, |(e, sprite, global)| {
+            if sprite.hidden != 0 || sprite.image.is_none() {
+                return;
+            }
+            let slot = assets.sprite_slot(sprite.image);
+            let Some(image) = assets.sprite_image(slot) else {
+                return;
+            };
+            let pose = pose_of(&global.0);
+            if !covers(sprite, &image, &pose, point) {
+                return;
+            }
+            let o = order(sorting, sprite.layer, sprite.order, pose[5]);
+            let key = (o.layer, o.key, e.index());
+            let over = |k: (i16, f32, u32)| {
+                (key.0, key.1.total_cmp(&k.1), key.2) > (k.0, core::cmp::Ordering::Equal, k.2)
+            };
+            if best.is_none_or(|(k, _)| over(k)) {
+                best = Some((key, e));
+            }
+        });
+        best.map(|(_, e)| e)
+    }
+
     /// Sorts by `sorting` from the next frame on.
     pub(crate) fn set_sorting(&mut self, sorting: &SortingFile) {
         self.sorting = YSorted::new(sorting);
@@ -561,6 +597,39 @@ fn order(sorting: &YSorted, layer: i16, order: i16, y: f32) -> Order {
 
 /// `sprite`'s quad at `pose` (its order still to set), or `None` when wholly outside
 /// `view`.
+/// Whether `point` (on the XY plane) is inside the quad `sprite` of `image` at `pose`
+/// covers (ADR 0125's E13-1b: the editor's 2D picking, by the sprite's rectangle).
+fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> bool {
+    let own = image.size / image.pixels_per_unit;
+    let size = Vec2::new(
+        if sprite.size.x == 0.0 {
+            own.x
+        } else {
+            sprite.size.x
+        },
+        if sprite.size.y == 0.0 {
+            own.y
+        } else {
+            sprite.size.y
+        },
+    );
+    let offset = (Vec2::splat(0.5) - image.pivot) * size;
+    let (x, y, at) = (
+        Vec2::new(pose[0], pose[1]),
+        Vec2::new(pose[2], pose[3]),
+        Vec2::new(pose[4], pose[5]),
+    );
+    let (ax, ay) = (x * size.x, y * size.y);
+    let d = point - (at + x * offset.x + y * offset.y);
+    let det = ax.x * ay.y - ax.y * ay.x;
+    if det.abs() < 1e-12 {
+        return false;
+    }
+    let a = (d.x * ay.y - d.y * ay.x) / det;
+    let b = (ax.x * d.y - ax.y * d.x) / det;
+    a.abs() <= 0.5 && b.abs() <= 0.5
+}
+
 fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect>) -> Option<Quad> {
     let own = image.size / image.pixels_per_unit;
     let size = Vec2::new(
@@ -631,6 +700,21 @@ mod tests {
     }
 
     const STILL: Pose = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+    /// A sprite's rectangle as picking sees it: around its pivot, turned with it.
+    #[test]
+    fn a_sprite_covers_its_rectangle_around_its_pivot() {
+        let sprite = Sprite::new(AssetRef::NONE);
+        // 32 × 16 px at 16 a metre, standing on its feet: x from -1 to 1, y from 0 to 1.
+        let feet = image(32.0, 16.0, Vec2::new(0.5, 0.0));
+        assert!(covers(&sprite, &feet, &STILL, Vec2::new(0.9, 0.9)));
+        assert!(!covers(&sprite, &feet, &STILL, Vec2::new(0.9, -0.1)));
+        assert!(!covers(&sprite, &feet, &STILL, Vec2::new(1.1, 0.5)));
+        // Turned a quarter: its x along +y, its height along -x.
+        let turned: Pose = [0.0, 1.0, -1.0, 0.0, 0.0, 0.0];
+        assert!(covers(&sprite, &feet, &turned, Vec2::new(-0.5, 0.9)));
+        assert!(!covers(&sprite, &feet, &turned, Vec2::new(0.5, 0.9)));
+    }
 
     #[test]
     fn a_sprite_is_its_pixels_over_its_pixels_a_metre_around_its_pivot() {

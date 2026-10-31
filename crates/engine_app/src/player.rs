@@ -1635,6 +1635,13 @@ impl Player {
         self.sprites.set_sorting(sorting);
     }
 
+    /// The sprite under `point` on the XY plane, the one drawn over the others there (ADR
+    /// 0125's E13-1b: the editor's 2D picking, by the sprites' rectangles).
+    pub fn sprite_at(&mut self, point: engine_core::math::Vec2) -> Option<Entity> {
+        self.sprites
+            .sprite_at(&self.runtime.world, &mut self.assets, point)
+    }
+
     /// What the last 2D view's frame recorded (ADR 0125): the sprites drawn, and those its
     /// view culled.
     pub fn sprites_recorded(&self) -> (u32, u32) {

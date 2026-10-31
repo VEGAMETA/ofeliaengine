@@ -4065,6 +4065,9 @@ struct Editor {
     /// The newest pick the overlay took (its pixel, its frame, the instance there or
     /// nearest), until [`Editor::resolve_pick`] names its entity.
     picked: Option<(PickRequest, u64, Option<u32>)>,
+    /// In 2D (ADR 0125's E13-1b), the sprite under a pick's pixel: sprites are not in the
+    /// pick pass, so a pick that found nothing names it.
+    picked_sprite: Option<(PickRequest, Entity)>,
     /// The entity under the pointer as the newest pick saw it (none: nothing), and that
     /// pick's pixel.
     hovered: Option<(PickRequest, Option<Entity>)>,
@@ -5002,6 +5005,7 @@ impl Editor {
             view_scale: [1.0, 1.0],
             frame_seen: 0,
             picked: None,
+            picked_sprite: None,
             hovered: None,
             hovered_slot: None,
             last_pick: None,
@@ -10642,6 +10646,11 @@ impl Editor {
         let Some((request, frame, instance)) = self.picked.take() else {
             return;
         };
+        let sprite = self
+            .picked_sprite
+            .take()
+            .filter(|&(r, _)| r == request)
+            .map(|(_, e)| e);
         let entity = instance.and_then(|slot| {
             let q = self.scene_ids.as_mut()?;
             let found = q
@@ -10656,6 +10665,7 @@ impl Editor {
                     .and_then(|e| scene_owner(world, e))
             })
         });
+        let entity = entity.or(sprite);
         self.hovered = Some((request, entity));
         if let Some((click, toggle, from)) = self.pending_click
             && click == request
@@ -29473,6 +29483,17 @@ impl<G> EditorGame<G> {
             shared.trigger_key.clear();
             shared.mesh_lines.clear();
         }
+        // 2D (ADR 0125's E13-1b): the sprite under the pixel of a pick that found nothing.
+        if let Some(height) = shared.orbit.flat
+            && let Some((request, _, None)) = shared.picked
+            && let Some([_, _, w, h]) = shared.view_rect
+        {
+            let size = Vec2::new(w as f32, h as f32) * Vec2::from(shared.view_scale);
+            let at = Vec2::new(request.x as f32, request.y as f32) + 0.5;
+            let off = Vec2::new(at.x - size.x * 0.5, size.y * 0.5 - at.y);
+            let point = shared.orbit.target.truncate() + off * (height / size.y.max(1.0));
+            shared.picked_sprite = player.sprite_at(point).map(|e| (request, e));
+        }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
@@ -34279,6 +34300,17 @@ mod tests {
             );
         }
         assert_eq!(ed.history.steps().count(), 1);
+        // A pick that found nothing in the pick pass names the sprite under its pixel.
+        let request = PickRequest {
+            x: 3,
+            y: 4,
+            transparent: false,
+        };
+        ed.picked = Some((request, 0, None));
+        ed.picked_sprite = Some((request, coin));
+        ed.resolve_pick(&world, |_| None);
+        assert_eq!(ed.hovered, Some((request, Some(coin))));
+        assert!(ed.picked_sprite.is_none());
         let id = ed.ids.view_2d;
         ed.run(&mut world, id);
         let back = ed.orbit;
