@@ -44,6 +44,11 @@ use engine_assets::material_pack::MATERIAL_PACK;
 /// The build file's name in a game's folder.
 pub const BUILD_FILE: &str = "game.build";
 
+/// The game's PSO record (ADR 0092, ADR 0126's G5a), beside its build file and committed
+/// with it: the material types' entry points the editor's Play drew, merged at each Stop;
+/// the build compiles only those of the types it names.
+pub const PSO_RECORD: &str = "game.pso.ron";
+
 /// The folder builds go to by default, under the game's folder (its `.gitignore` names it).
 pub const DEFAULT_OUTPUT: &str = "builds";
 
