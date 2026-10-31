@@ -4068,6 +4068,8 @@ struct Editor {
     /// In 2D (ADR 0125's E13-1b), the sprite under a pick's pixel: sprites are not in the
     /// pick pass, so a pick that found nothing names it.
     picked_sprite: Option<(PickRequest, Entity)>,
+    /// The opaque pixels of the sprite images clicked on (E13-1b-6).
+    sprite_masks: crate::sprite_masks::SpriteMasks,
     /// The entity under the pointer as the newest pick saw it (none: nothing), and that
     /// pick's pixel.
     hovered: Option<(PickRequest, Option<Entity>)>,
@@ -5006,6 +5008,7 @@ impl Editor {
             frame_seen: 0,
             picked: None,
             picked_sprite: None,
+            sprite_masks: Default::default(),
             hovered: None,
             hovered_slot: None,
             last_pick: None,
@@ -29492,7 +29495,11 @@ impl<G> EditorGame<G> {
             let at = Vec2::new(request.x as f32, request.y as f32) + 0.5;
             let off = Vec2::new(at.x - size.x * 0.5, size.y * 0.5 - at.y);
             let point = shared.orbit.target.truncate() + off * (height / size.y.max(1.0));
-            shared.picked_sprite = player.sprite_at(point).map(|e| (request, e));
+            // Where its image shows (E13-1b-6): a click on a clear pixel goes through.
+            let ed = &mut *shared;
+            let (masks, db) = (&mut ed.sprite_masks, &ed.asset_db);
+            let hit = player.sprite_at(point, |image, uv| masks.opaque(db, image.file, uv));
+            ed.picked_sprite = hit.map(|e| (request, e));
         }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.

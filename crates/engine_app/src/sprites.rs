@@ -372,8 +372,9 @@ impl Sprites {
         }
     }
 
-    /// The sprite whose rectangle holds `point` (on the XY plane), the one drawn over the
-    /// others there (the highest layer, then the layer's order or y-sorting, then the later entity; sort
+    /// The sprite under `point` (on the XY plane) for which `opaque` says its image is
+    /// there (given the image and the texture coordinates `point` falls on, 0 to 1 from
+    /// the image's top left), the one drawn over the others there (the highest layer, then the layer's order or y-sorting, then the later entity; sort
     /// groups are not looked at): the editor's
     /// 2D picking (ADR 0125's E13-1b). Sprites whose image is not made yet are passed over.
     pub(crate) fn sprite_at(
@@ -381,6 +382,7 @@ impl Sprites {
         world: &World,
         assets: &mut Assets,
         point: Vec2,
+        opaque: &mut dyn FnMut(AssetRef, Vec2) -> bool,
     ) -> Option<Entity> {
         let mut best: Option<((i16, f32, u32), Entity)> = None;
         let Self { drawn, sorting, .. } = self;
@@ -393,15 +395,15 @@ impl Sprites {
                 return;
             };
             let pose = pose_of(&global.0);
-            if !covers(sprite, &image, &pose, point) {
+            let Some(uv) = covers(sprite, &image, &pose, point) else {
                 return;
-            }
+            };
             let o = order(sorting, sprite.layer, sprite.order, pose[5]);
             let key = (o.layer, o.key, e.index());
             let over = |k: (i16, f32, u32)| {
                 (key.0, key.1.total_cmp(&k.1), key.2) > (k.0, core::cmp::Ordering::Equal, k.2)
             };
-            if best.is_none_or(|(k, _)| over(k)) {
+            if best.is_none_or(|(k, _)| over(k)) && opaque(sprite.image, uv) {
                 best = Some((key, e));
             }
         });
@@ -595,11 +597,10 @@ fn order(sorting: &YSorted, layer: i16, order: i16, y: f32) -> Order {
     }
 }
 
-/// `sprite`'s quad at `pose` (its order still to set), or `None` when wholly outside
-/// `view`.
-/// Whether `point` (on the XY plane) is inside the quad `sprite` of `image` at `pose`
-/// covers (ADR 0125's E13-1b: the editor's 2D picking, by the sprite's rectangle).
-fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> bool {
+/// Where in its image `point` (on the XY plane) falls, when inside the quad `sprite` of
+/// `image` covers at `pose`: its texture coordinates (0 to 1, the image's top at v 0,
+/// flips applied), as the 2D pass samples there (ADR 0125's E13-1b: the editor's picking).
+fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> Option<Vec2> {
     let own = image.size / image.pixels_per_unit;
     let size = Vec2::new(
         if sprite.size.x == 0.0 {
@@ -623,13 +624,22 @@ fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> boo
     let d = point - (at + x * offset.x + y * offset.y);
     let det = ax.x * ay.y - ax.y * ay.x;
     if det.abs() < 1e-12 {
-        return false;
+        return None;
     }
     let a = (d.x * ay.y - d.y * ay.x) / det;
     let b = (ax.x * d.y - ax.y * d.x) / det;
-    a.abs() <= 0.5 && b.abs() <= 0.5
+    if a.abs() > 0.5 || b.abs() > 0.5 {
+        return None;
+    }
+    let (u, v) = (a + 0.5, 0.5 - b);
+    Some(Vec2::new(
+        if sprite.flip_x != 0 { 1.0 - u } else { u },
+        if sprite.flip_y != 0 { 1.0 - v } else { v },
+    ))
 }
 
+/// `sprite`'s quad at `pose` (its order still to set), or `None` when wholly outside
+/// `view`.
 fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect>) -> Option<Quad> {
     let own = image.size / image.pixels_per_unit;
     let size = Vec2::new(
@@ -707,13 +717,25 @@ mod tests {
         let sprite = Sprite::new(AssetRef::NONE);
         // 32 × 16 px at 16 a metre, standing on its feet: x from -1 to 1, y from 0 to 1.
         let feet = image(32.0, 16.0, Vec2::new(0.5, 0.0));
-        assert!(covers(&sprite, &feet, &STILL, Vec2::new(0.9, 0.9)));
-        assert!(!covers(&sprite, &feet, &STILL, Vec2::new(0.9, -0.1)));
-        assert!(!covers(&sprite, &feet, &STILL, Vec2::new(1.1, 0.5)));
+        let near = |a: Option<Vec2>, b: Vec2| a.is_some_and(|a| (a - b).abs().max_element() < 1e-5);
+        // Its top right corner's pixel: u near 1, v near 0 (the image's top).
+        assert!(near(
+            covers(&sprite, &feet, &STILL, Vec2::new(0.9, 0.9)),
+            Vec2::new(0.95, 0.1)
+        ));
+        assert!(covers(&sprite, &feet, &STILL, Vec2::new(0.9, -0.1)).is_none());
+        assert!(covers(&sprite, &feet, &STILL, Vec2::new(1.1, 0.5)).is_none());
+        // Mirrored both ways: the same point on the opposite corner of the image.
+        let mut flipped = sprite;
+        (flipped.flip_x, flipped.flip_y) = (1, 1);
+        assert!(near(
+            covers(&flipped, &feet, &STILL, Vec2::new(0.9, 0.9)),
+            Vec2::new(0.05, 0.9)
+        ));
         // Turned a quarter: its x along +y, its height along -x.
         let turned: Pose = [0.0, 1.0, -1.0, 0.0, 0.0, 0.0];
-        assert!(covers(&sprite, &feet, &turned, Vec2::new(-0.5, 0.9)));
-        assert!(!covers(&sprite, &feet, &turned, Vec2::new(0.5, 0.9)));
+        assert!(covers(&sprite, &feet, &turned, Vec2::new(-0.5, 0.9)).is_some());
+        assert!(covers(&sprite, &feet, &turned, Vec2::new(0.5, 0.9)).is_none());
     }
 
     #[test]

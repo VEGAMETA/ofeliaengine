@@ -318,11 +318,18 @@ fn sprites_sort_by_layer_order_y_and_group() {
     ];
     for ((x, y), expected) in picks {
         assert_eq!(
-            player.sprite_at(Vec2::new(x, y)),
+            player.sprite_at(Vec2::new(x, y), |_, _| true),
             expected,
             "picked at {x}, {y}"
         );
     }
+    // Where red's image is clear, the click goes through it to green under it.
+    let through = player.sprite_at(Vec2::new(0.35, 0.1), |image, _| image != red.image);
+    assert_eq!(
+        through,
+        Some(green_e),
+        "a clear pixel picks what is under it"
+    );
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -51,6 +51,7 @@ mod slangd;
 mod snap;
 mod sound_handles;
 mod sound_view;
+mod sprite_masks;
 mod text_highlight;
 mod thumbnails;
 mod transform;

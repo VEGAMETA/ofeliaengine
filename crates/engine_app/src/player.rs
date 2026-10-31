@@ -1636,10 +1636,17 @@ impl Player {
     }
 
     /// The sprite under `point` on the XY plane, the one drawn over the others there (ADR
-    /// 0125's E13-1b: the editor's 2D picking, by the sprites' rectangles).
-    pub fn sprite_at(&mut self, point: engine_core::math::Vec2) -> Option<Entity> {
+    /// 0125's E13-1b: the editor's 2D picking): of those whose rectangle holds it, the
+    /// topmost for which `opaque` says its image is there, given the image and the texture
+    /// coordinates `point` falls on (0 to 1 from the image's top left, flips applied).
+    /// `|_, _| true` picks by rectangles.
+    pub fn sprite_at(
+        &mut self,
+        point: engine_core::math::Vec2,
+        mut opaque: impl FnMut(engine_scene::AssetRef, engine_core::math::Vec2) -> bool,
+    ) -> Option<Entity> {
         self.sprites
-            .sprite_at(&self.runtime.world, &mut self.assets, point)
+            .sprite_at(&self.runtime.world, &mut self.assets, point, &mut opaque)
     }
 
     /// What the last 2D view's frame recorded (ADR 0125): the sprites drawn, and those its
