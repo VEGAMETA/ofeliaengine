@@ -8,7 +8,7 @@
 use engine_app::{
     FrameParts, Game, Player, PlayerSettings, SortGroup, SortingFile, SortingLayer, Sprite, Window,
 };
-use engine_core::math::Vec3;
+use engine_core::math::{Vec2, Vec3};
 use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, bytemuck, pod_component};
 use engine_runtime::Camera;
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, SpriteImport};
@@ -252,12 +252,12 @@ fn sprites_sort_by_layer_order_y_and_group() {
     };
     // Layer 0 by order: red (1) over green (0), though green comes later; blue on layer
     // −1 under both.
-    sprite_at(0.0, 0.0, red.on_layer(0, 1));
-    sprite_at(0.5, 0.0, green.on_layer(0, 0));
-    sprite_at(0.25, 0.5, blue.on_layer(-1, 9));
+    let red_e = sprite_at(0.0, 0.0, red.on_layer(0, 1));
+    let green_e = sprite_at(0.5, 0.0, green.on_layer(0, 0));
+    let blue_e = sprite_at(0.25, 0.5, blue.on_layer(-1, 9));
     // Layer 1 by y: yellow (lower, nearer) over white, though white comes later.
-    sprite_at(4.0, 0.0, yellow.on_layer(1, 0));
-    sprite_at(4.5, 0.5, white.on_layer(1, 0));
+    let yellow_e = sprite_at(4.0, 0.0, yellow.on_layer(1, 0));
+    let white_e = sprite_at(4.5, 0.5, white.on_layer(1, 0));
     // Two characters at the same height on layer 1, each a body (order 0) and a sword
     // (order 1) made sword first: within a group by order (the sword over the body), and
     // the groups whole (the second over the first), never interleaved by a tie in y.
@@ -307,6 +307,22 @@ fn sprites_sort_by_layer_order_y_and_group() {
     assert_eq!(at(&rgba, -4.4, -2.0), b, "the second group over the first");
     assert_eq!(at(&rgba, -4.0, -2.1), y, "the second sword over its body");
     assert_eq!(at(&rgba, -3.4, -2.0), y, "the second sword alone");
+    // The editor's 2D picking (E13-1b) names the sprite drawn on top there.
+    let picks = [
+        ((0.35, 0.1), Some(red_e)),
+        ((0.8, 0.1), Some(green_e)),
+        ((0.35, 0.6), Some(blue_e)),
+        ((4.35, 0.35), Some(yellow_e)),
+        ((4.65, 0.65), Some(white_e)),
+        ((9.0, 9.0), None),
+    ];
+    for ((x, y), expected) in picks {
+        assert_eq!(
+            player.sprite_at(Vec2::new(x, y)),
+            expected,
+            "picked at {x}, {y}"
+        );
+    }
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -439,7 +455,7 @@ fn sprites_are_kept_in_scenes_and_saves() {
     paths.insert(AssetRef::file(image), "art/hero.png");
     let sprite = Sprite {
         flip_x: 1,
-        size: engine_core::math::Vec2::new(2.0, 0.0),
+        size: Vec2::new(2.0, 0.0),
         ..Sprite::new(AssetRef::file(image))
             .on_layer(3, -2)
             .with_color([1.0, 0.5, 0.25, 0.75])
