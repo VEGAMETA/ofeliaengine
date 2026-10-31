@@ -332,6 +332,13 @@ if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(
   `player.hold_graph_param(entity, slot, Some(value))` holds one there for testing over
   what the game sets (what the editor's Graph section does in Play) until `None` or the
   run's end.
+- **A graph in the model preview** (E12-5d-2d, for tools): `player.preview_graph(Some(file))`
+  makes the live model preview (`set_model_preview`) play graph file `file` in place of its
+  clip, the editor's copy while one is held; it walks on its spot, ticks at 64 Hz by the
+  frame's time and is drawn every frame it plays. `player.hold_preview_param(slot, value)`
+  holds a parameter of it (not saved anywhere), and `player.preview_graph_now(node)` tells
+  where a machine of it is, as `graph_now_node` does for a character. None allocates per
+  frame.
 
 ```text
 [agraph version=1 id=…]

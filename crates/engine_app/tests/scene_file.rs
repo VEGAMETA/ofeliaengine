@@ -3742,3 +3742,179 @@ fn a_fox_plays_an_animation_graph() {
     assert!(off(&broken, &rest) < 1e-4, "{}", off(&broken, &rest));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-5d-2d: the live model preview plays an animation graph the editor holds
+/// (its one state playing the model's clip): drawn every frame while it plays, the pictures
+/// moving, its machine's state read by its node, a held parameter kept; let go, it is drawn
+/// once more in its rest pose and then no more.
+#[test]
+fn a_model_preview_plays_an_animation_graph() {
+    use engine_scene::{
+        AnimGraphFile, AssetId, LayerFile, NodeFile, NodeKind, ParamFile, StateFile,
+    };
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-graph-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let settings = PlayerSettings {
+        title: String::from("graph preview test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 240,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut paths = player.assets().paths().clone();
+    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    player.assets_mut().add_paths(&paths);
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let preview = engine_app::ModelPreview {
+        mesh,
+        material,
+        turn: [0.0, 0.0],
+        pose: None,
+        floor: None,
+        beside: None,
+    };
+    let mut pixels = Vec::new();
+    let started = Instant::now();
+    loop {
+        player.set_model_preview(Some(preview));
+        player.frame(&mut game).unwrap();
+        if player.take_model_preview(&mut pixels) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no model preview"
+        );
+    }
+    let rest = pixels.clone();
+    let clip = player
+        .model_preview_rig()
+        .and_then(|r| r.clips().first().map(|c| c.name().to_owned()))
+        .expect("CesiumMan's clip");
+    // The graph, as the editor holds it: one machine, one state playing the clip.
+    let mut file = AnimGraphFile::default();
+    file.params
+        .insert(String::from("speed"), ParamFile::default());
+    file.layers.insert(
+        String::from("base"),
+        LayerFile {
+            name: String::from("Base"),
+            root: String::from("m"),
+            ..LayerFile::default()
+        },
+    );
+    file.nodes.insert(
+        String::from("c"),
+        NodeFile {
+            clip,
+            ..NodeFile::default()
+        },
+    );
+    file.nodes.insert(
+        String::from("m"),
+        NodeFile {
+            kind: NodeKind::Machine,
+            entry: String::from("walk"),
+            ..NodeFile::default()
+        },
+    );
+    file.states.insert(
+        String::from("walk"),
+        StateFile {
+            name: String::from("Walking"),
+            machine: String::from("m"),
+            pose: String::from("c"),
+            at: [0.0, 0.0],
+        },
+    );
+    let graph = AssetId::new();
+    player.assets_mut().set_anim_graph(graph, Some(&file));
+    player.preview_graph(Some(graph));
+    player.hold_preview_param(0, Some(2.5));
+    let differ = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 24))
+            .count()
+    };
+    // Drawn every frame once it plays; half a second on, the man has moved.
+    let mut drawings = 0;
+    let mut first = None;
+    for _ in 0..40 {
+        player.set_model_preview(Some(preview));
+        player.frame(&mut game).unwrap();
+        if player.take_model_preview(&mut pixels) {
+            drawings += 1;
+            first.get_or_insert_with(|| pixels.clone());
+        }
+    }
+    let first = first.expect("drawn while the graph plays");
+    // Nodes in their ids' order: c, m.
+    let now = player.preview_graph_now(1).expect("its machine plays");
+    println!(
+        "graph preview: {drawings} drawings in 40 frames; {} pixels moved from the rest pose, \
+         {} over the frames; {} at {:.2} s",
+        differ(&rest, &pixels),
+        differ(&first, &pixels),
+        now.state,
+        now.seconds
+    );
+    assert_eq!(now.state, "Walking");
+    assert!(now.seconds > 0.3, "{now:?}");
+    assert!(drawings >= 30, "{drawings} drawings");
+    assert!(differ(&first, &pixels) > 50, "the walk moves it");
+    assert!(player.preview_graph_now(0).is_none(), "a clip's node");
+    // Let go: its rest pose drawn once, then nothing more.
+    player.preview_graph(None);
+    let mut again = 0;
+    for _ in 0..10 {
+        player.set_model_preview(Some(preview));
+        player.frame(&mut game).unwrap();
+        if player.take_model_preview(&mut pixels) {
+            again += 1;
+        }
+    }
+    // The drawings in flight come back, then its rest pose once.
+    assert!(
+        (1..=3).contains(&again),
+        "{again} drawings after it was let go"
+    );
+    assert!(differ(&rest, &pixels) < 20, "back to its rest pose");
+    player.set_model_preview(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -584,6 +584,26 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2d-1, 2026-10-31): the model preview plays a graph
+
+- **The engine's half of the canvas's corner preview:** `Player::preview_graph(file)` makes
+  the live model preview play an animation graph file (the editor's copy while it holds
+  one) in place of its clip: cooked for the preview's rig once its skin is made (again when
+  the file or the rig changes, through the same `Graphs::cook` the characters use), ticked
+  at 64 Hz by the frame's real time (at most a quarter second a frame), posed each frame
+  between its ticks, its root motion out of the pose (it walks on its spot), drawn every
+  frame while it plays; letting it go draws the clip's pose (or the rest pose) again.
+- `Player::hold_preview_param(slot, value)`: the editor's preview values, held each tick,
+  not saved; `Player::preview_graph_now(node)`: where a machine of it is, by its node, as
+  `graph_now_node` for a character (the canvas lights the preview's state outside Play).
+- **Tests:** CesiumMan's preview playing a one-state graph of its clip: 38 drawings in 40
+  frames, 1,347 pixels changed over them, `Walking` at 0.66 s through its node, a clip's
+  node none; let go, the drawings in flight and then its rest pose (within 20 pixels of
+  it); the skins' zero-allocation test now also plays the dancer's graph (layers, a mask,
+  cross-fades) on the preview with its speed held and changed: 0 allocations.
+- **Next (E12-5d-2d-2):** the editor shows it in the graph canvas's corner with the
+  parameters' preview rows.
+
 ## As built (E12-5d-2c-2, 2026-10-31): grouping states into a machine and taking it apart
 
 - **Ctrl+G** on an animation graph's canvas groups the selected states of the machine shown

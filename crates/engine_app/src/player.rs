@@ -1406,6 +1406,29 @@ impl Player {
         self.previews.set_live(preview);
     }
 
+    /// The animation graph file the live model preview plays in place of its clip (ADR
+    /// 0124's E12-5d-2d: the editor's graph tab shows its character in a corner), or none.
+    /// It reads the editor's copy while one is held ([`crate::Assets::set_anim_graph`]); another file
+    /// starts anew at its entry. Its root motion stays out of the pose (it walks on its
+    /// spot); it is ticked at 64 Hz by the frame's time and drawn every frame it plays.
+    pub fn preview_graph(&mut self, file: Option<engine_scene::AssetId>) {
+        if self.assets.set_preview_graph(file) {
+            self.previews.redraw_live();
+        }
+    }
+
+    /// Parameter `slot` of the previewed graph held at `value`, or given back to the graph's
+    /// own value (none): the editor's preview values, not saved anywhere.
+    pub fn hold_preview_param(&mut self, slot: u16, value: Option<f32>) {
+        self.assets.hold_preview_param(slot, value);
+    }
+
+    /// Where machine node `node` of the previewed graph is (its place among the graph file's
+    /// nodes, as [`Self::graph_now_node`]), once the preview plays it.
+    pub fn preview_graph_now(&self, node: usize) -> Option<engine_anim::MachineNow<'_>> {
+        self.assets.preview_graph_now(node)
+    }
+
     /// The live model preview's rig, once its skin is made.
     pub fn model_preview_rig(&self) -> Option<&crate::Rig> {
         self.assets.preview_rig()
@@ -3409,6 +3432,8 @@ impl Player {
                 sprites
                     .borrow_mut()
                     .request_images(world, &mut assets.borrow_mut());
+                // The editor's previewed graph moves on by the frame's time (E12-5d-2d).
+                assets.borrow_mut().tick_preview_graph(frame_dt);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
                 assets.borrow_mut().sync(

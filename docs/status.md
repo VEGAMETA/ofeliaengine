@@ -879,6 +879,10 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5d-2d-1, the model preview plays a graph** (#496, ADR 0124's as-built):
+    `Player::preview_graph`, `hold_preview_param`, `preview_graph_now`: the live model
+    preview plays an animation graph (the editor's copy) at 64 Hz by the frame's time, on
+    its spot, drawn every frame it plays; 0 allocations. The canvas's corner next (2d-2).
   - **E12-5d-2c-2, grouping states** (#495, ADR 0124's as-built; the team's а for the
     runtime): Ctrl+G puts the selected states into a machine played by a new state (the
     transitions in come into it, those out leave it, the same ones merged, the entry kept
@@ -2546,6 +2550,12 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
+- **Flaky under load (2026-10-31): `a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor`**
+  (engine_editor `assets`): once in a gate's gpu step the man was let go at y −0.354, not
+  on the floor at −0.5; alone it passes (3 of 3). The hold already waits until he stands;
+  the release frame likely takes a later surface pick that hit him or the view's edge.
+  To fix: the drop on release keeps the last standing place (or the test waits for the
+  pick after the release).
 - **Fixed (2026-10-30, #481): sounds spawned to end on their own never ended without an
   audio device** (found by E12-3b-1's test): a source no device plays now plays out unheard
   on the game's clock and ends at its sound's length (stopped, looped or despawned, as its
