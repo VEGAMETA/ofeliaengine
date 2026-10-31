@@ -2550,6 +2550,12 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
+- **Flaky under load (2026-10-31): `a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor`**
+  (engine_editor `assets`): once in a gate's gpu step the man was let go at y −0.354, not
+  on the floor at −0.5; alone it passes (3 of 3). The hold already waits until he stands;
+  the release frame likely takes a later surface pick that hit him or the view's edge.
+  To fix: the drop on release keeps the last standing place (or the test waits for the
+  pick after the release).
 - **Fixed (2026-10-30, #481): sounds spawned to end on their own never ended without an
   audio device** (found by E12-3b-1's test): a source no device plays now plays out unheard
   on the game's clock and ends at its sound's length (stopped, looped or despawned, as its
