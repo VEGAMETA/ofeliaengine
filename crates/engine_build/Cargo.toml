@@ -22,3 +22,5 @@ engine_scene.workspace = true
 [dev-dependencies]
 # Whether Slang is at hand for the material pack's test.
 engine_shader.workspace = true
+# Images for the derived data pack's test (already built for engine_assets).
+png = "0.18"

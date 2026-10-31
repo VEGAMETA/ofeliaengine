@@ -170,6 +170,10 @@ ofeliaengine build --ship     the same, built for shipping (slower to build, fas
 - **Materials of your own types and graphs** are compiled at build time into
   `data/materials.pack` (the Vulkan SDK is needed where you build, never where players
   play); they draw from the first frames, with no shader compiling on players' machines.
+- **Textures and colliders** are compressed (BC7, BC5 for normal maps) and cooked at build
+  time into `data/derived.pack`, through the editor's cache, so a texture the editor has
+  shown is not compressed again. An image whose import settings keep it uncompressed
+  stays so.
 - **Again:** files that did not change are kept, so the second build only compiles your
   code (seconds) and copies what changed. `builds/` is in the game's `.gitignore`.
 

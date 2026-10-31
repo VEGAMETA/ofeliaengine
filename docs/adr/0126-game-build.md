@@ -83,7 +83,7 @@
 |---|---|
 | **G1** | the build file, the dependency walk, `ofeliaengine build`: the game built, its scenes and the assets they reach in the folder as they are now read (a runnable build, option 2's shape), notices, `plugins/`; the run-from-the-folder test |
 | **G2** | material types and graphs to SPIR-V at build time, the player loading them (no Slang at run time) |
-| **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs |
+| **G3** | the cook from the project: models, textures, colliders, navigation into packs; the player reading a scene's assets from packs. In three: **G3a** the derived data (compressed textures, cooked colliders) in one read-only pack beside the sources; **G3b** the models and images cooked, their sources left out; **G3c** navigation baked |
 | **G4** | the editor's Build: the settings section, the task, errors at their causes, Run the Build |
 | **G5** | scripts as Luau bytecode, the PSO warm-up list, a size report, an optional zip |
 
@@ -170,6 +170,43 @@
 - **Left:** every fragment entry point of `forward.slang` is compiled for every type (159
   each): the PSO record of G5 keeps the ones playtests draw. The key does not hold Slang's
   own version (a Slang update with no shader change keeps the old pack; delete it).
+
+## As built (G3a, 2026-10-31): the derived data in `derived.pack`
+
+Without the editor's derived data cache a built game's player kept every texture as
+decoded RGBA8 (four times the memory of BC7, no compressed mips) and cooked a model's
+colliders again on every run. G3a carries what the editor's cache would hold.
+
+- **`engine_assets::DerivedDataCache`** gains a second store: `open_pack` reads
+  `derived.pack` (`"OFDD"`, version, an index of key, kind, offset and length, then the
+  entries) as a cache that has its entries and stores nothing (`put` fails, `read_only`);
+  entries are read with positional reads of one open file, from any thread. A cache made
+  `recording` notes every entry read or stored through it (`used`), and `write_pack` packs
+  those.
+- **The build** (`engine_build::derived`, after the folder is written): through the
+  editor's own cache (`.ofelia/ddc`, so what the editor made is not made again, and what
+  the build makes the editor finds), recording, the same imports the player makes and with
+  the same keys: every glTF's textures for their uses (`engine_assets::cook::texture_uses`,
+  now public, the uses the player keys its textures by) and its colliders by its rules
+  (`cook_node_colliders`, as `Assets::collider` cooks them); typed materials' texture
+  parameters for their encodings; the other images planned (sprites) as color. An image
+  whose `.meta` keeps it uncompressed is left out, as the player leaves it. A pack with the
+  same entries is kept (the keys hash the sources and the settings).
+- **The player:** with no derived data cache in its settings and a `derived.pack` in its
+  project, that pack is its cache; with a read-only cache nothing is compressed while the
+  game runs (a texture missing from it stays as decoded).
+- **Measured on ref-1:** a game with FlightHelmet (15 textures of 2048²): 7.6 s to
+  compress them the first time, 0.1 s again (the pack kept), a 71.3 MB pack; the player
+  then loads them as the editor's warm cache does (E4-8: 8 times faster than decoding,
+  a quarter of the memory).
+- **Tests:** a sprite, an image kept uncompressed and a typed material's normal map: the
+  two compressed for their uses, found by the player's lookup, the pack read-only and
+  kept when nothing changed; a built game's player drawing two models (an image file, an
+  image inside the glTF) with both textures compressed from the pack, nothing compressed
+  and nothing written beside it.
+- **Left for G3b:** the sources still go in beside the pack (the keys are their bytes'
+  hashes); the glTF files are still imported when loaded; HDR panoramas (the sky) are not
+  in the pack.
 
 ## Questions for the team
 

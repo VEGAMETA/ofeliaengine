@@ -2254,8 +2254,11 @@ impl Assets {
                     if cached {
                         self.compressed_textures.insert(key);
                     }
-                    // Not in the cache: compressed in the background, swapped in once done.
-                    if let (Some(source), Some(cache)) = (compress, &self.cache) {
+                    // Not in the cache: compressed in the background, swapped in once done
+                    // (not with a built game's read-only pack: it stays as it is).
+                    if let (Some(source), Some(cache)) =
+                        (compress, self.cache.as_ref().filter(|c| !c.read_only()))
+                    {
                         let generation = self.generation(key.file);
                         self.loader.give(Job::Compress {
                             key,

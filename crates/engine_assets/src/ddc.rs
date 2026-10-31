@@ -7,14 +7,35 @@
 //! name and renamed, so a crash never leaves a torn entry and several processes (later the
 //! team's shared cache) can use one directory. The entry format is internal to the cache,
 //! versioned by the key: it is not the cooked runtime format.
+//!
+//! A built game carries the entries its assets need as one read-only file, `derived.pack`
+//! (ADR 0126's G3a): [`DerivedDataCache::open_pack`] reads it as a cache that has them and
+//! stores nothing; a build records which entries its imports used
+//! ([`DerivedDataCache::recording`]) and writes them there ([`DerivedDataCache::write_pack`]).
+//!
+//! ```text
+//! "OFDD"  u32 version  u32 entries, each: u128 key, u8 kind bytes, kind, u64 offset,
+//!         u64 bytes;  then the entries' bytes
+//! ```
 
 use crate::texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress};
 use crate::texture_import::{ImageError, TextureUsage, build_mips, decode_image};
 use engine_core::hash::{StableHasher, content_hash128, to_hex};
 use engine_core::jobs::ThreadPool;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// A built game's read-only cache file in its `data/` folder.
+pub const DERIVED_PACK: &str = "derived.pack";
+
+const PACK_MAGIC: &[u8; 4] = b"OFDD";
+const PACK_VERSION: u32 = 1;
+
+/// An entry's key and kind.
+pub type EntryName = (u128, String);
 
 /// Whether a result came from the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,10 +46,21 @@ pub enum CacheOutcome {
     Miss,
 }
 
-/// A derived data cache directory.
+/// A derived data cache: a directory, or a built game's read-only pack.
 #[derive(Debug, Clone)]
 pub struct DerivedDataCache {
     dir: PathBuf,
+    /// A pack's entries (the cache is then read-only; `dir` is the pack's path).
+    pack: Option<Arc<Pack>>,
+    /// The entries read or stored through it, when it records them (a build).
+    used: Option<Arc<Mutex<BTreeSet<EntryName>>>>,
+}
+
+/// A read-only pack of entries: its file and where each entry is in it.
+#[derive(Debug)]
+struct Pack {
+    file: fs::File,
+    entries: HashMap<EntryName, (u64, u64)>,
 }
 
 impl DerivedDataCache {
@@ -36,10 +68,133 @@ impl DerivedDataCache {
     pub fn new(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            pack: None,
+            used: None,
+        })
     }
 
-    /// The cache directory.
+    /// The pack at `path` as a read-only cache (a built game's `derived.pack`).
+    ///
+    /// # Errors
+    ///
+    /// A file that cannot be read, or is not a pack of this version.
+    pub fn open_pack(path: impl Into<PathBuf>) -> io::Result<Self> {
+        use std::io::Read as _;
+        let path = path.into();
+        let mut file = fs::File::open(&path)?;
+        let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
+        let mut head = [0u8; 12];
+        file.read_exact(&mut head)?;
+        if &head[..4] != PACK_MAGIC {
+            return Err(bad("not a derived data pack"));
+        }
+        let version = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+        if version != PACK_VERSION {
+            return Err(bad("a derived data pack of another version"));
+        }
+        let count = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as usize;
+        let mut index = io::BufReader::new(&mut file);
+        let mut entries = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let mut key = [0u8; 17];
+            index.read_exact(&mut key)?;
+            let mut kind = vec![0u8; usize::from(key[16])];
+            index.read_exact(&mut kind)?;
+            let mut place = [0u8; 16];
+            index.read_exact(&mut place)?;
+            let key = u128::from_le_bytes(key[..16].try_into().unwrap_or_default());
+            let kind = String::from_utf8(kind).map_err(|_| bad("a kind not in UTF-8"))?;
+            let offset = u64::from_le_bytes(place[..8].try_into().unwrap_or_default());
+            let bytes = u64::from_le_bytes(place[8..].try_into().unwrap_or_default());
+            entries.insert((key, kind), (offset, bytes));
+        }
+        drop(index);
+        Ok(Self {
+            dir: path,
+            pack: Some(Arc::new(Pack { file, entries })),
+            used: None,
+        })
+    }
+
+    /// The same cache, recording every entry read from it or stored in it: what a build
+    /// packs ([`Self::used`], [`Self::write_pack`]).
+    pub fn recording(&self) -> Self {
+        Self {
+            used: Some(Arc::new(Mutex::new(BTreeSet::new()))),
+            ..self.clone()
+        }
+    }
+
+    /// The entries read or stored so far through a recording cache, sorted.
+    pub fn used(&self) -> Vec<EntryName> {
+        self.used
+            .as_ref()
+            .and_then(|u| u.lock().ok().map(|u| u.iter().cloned().collect()))
+            .unwrap_or_default()
+    }
+
+    fn note(&self, key: u128, kind: &str) {
+        if let Some(used) = &self.used
+            && let Ok(mut used) = used.lock()
+        {
+            used.insert((key, kind.to_owned()));
+        }
+    }
+
+    /// Whether it stores nothing (a pack).
+    pub fn read_only(&self) -> bool {
+        self.pack.is_some()
+    }
+
+    /// Entries `entries` of this cache written as a pack at `path` (read-only, one file);
+    /// the bytes written. An entry it no longer has is left out.
+    ///
+    /// # Errors
+    ///
+    /// The pack not written.
+    pub fn write_pack(&self, entries: &[EntryName], path: &Path) -> io::Result<u64> {
+        let mut found = Vec::with_capacity(entries.len());
+        for (key, kind) in entries {
+            if let Some(bytes) = self.get(*key, kind) {
+                found.push((*key, kind.as_str(), bytes));
+            }
+        }
+        let index: usize = found.iter().map(|(_, kind, _)| 17 + kind.len() + 16).sum();
+        let mut offset = (12 + index) as u64;
+        let mut out = Vec::with_capacity(12 + index);
+        out.extend_from_slice(PACK_MAGIC);
+        out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+        out.extend_from_slice(&(found.len() as u32).to_le_bytes());
+        for (key, kind, bytes) in &found {
+            out.extend_from_slice(&key.to_le_bytes());
+            out.push(kind.len() as u8);
+            out.extend_from_slice(kind.as_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            offset += bytes.len() as u64;
+        }
+        for (_, _, bytes) in &found {
+            out.extend_from_slice(bytes);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &out)?;
+        Ok(out.len() as u64)
+    }
+
+    /// The names of the entries in a pack at `path` (a build compares them with what it
+    /// would write); `None` without a readable pack there.
+    pub fn pack_entries(path: &Path) -> Option<Vec<EntryName>> {
+        let pack = Self::open_pack(path).ok()?.pack?;
+        let mut names: Vec<EntryName> = pack.entries.keys().cloned().collect();
+        names.sort();
+        Some(names)
+    }
+
+    /// The cache directory (a pack's path for a pack).
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -50,14 +205,42 @@ impl DerivedDataCache {
 
     /// The entry of `key`, if cached.
     pub fn get(&self, key: u128, kind: &str) -> Option<Vec<u8>> {
-        fs::read(self.path(key, kind)).ok()
+        let bytes = match &self.pack {
+            Some(pack) => {
+                use std::os::windows::fs::FileExt as _;
+                let &(offset, len) = pack.entries.get(&(key, kind.to_owned()))?;
+                let mut bytes = vec![0u8; usize::try_from(len).ok()?];
+                let mut done = 0;
+                while done < bytes.len() {
+                    let n = pack
+                        .file
+                        .seek_read(&mut bytes[done..], offset + done as u64)
+                        .ok()?;
+                    if n == 0 {
+                        return None;
+                    }
+                    done += n;
+                }
+                bytes
+            }
+            None => fs::read(self.path(key, kind)).ok()?,
+        };
+        self.note(key, kind);
+        Some(bytes)
     }
 
     /// Stores an entry (atomically: readers see the old entry or the new one). Writers of
     /// the same entry at once (threads of one process, or processes) each write a
-    /// temporary file of their own: the last rename wins, whole.
+    /// temporary file of their own: the last rename wins, whole. A pack stores nothing.
     pub fn put(&self, key: u128, kind: &str, bytes: &[u8]) -> io::Result<()> {
         static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if self.pack.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::ReadOnlyFilesystem,
+                "a derived data pack is read-only",
+            ));
+        }
+        self.note(key, kind);
         let path = self.path(key, kind);
         let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let temp = path.with_extension(format!("{kind}.tmp{}-{n}", std::process::id()));

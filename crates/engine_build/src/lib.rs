@@ -14,13 +14,16 @@
 //!   `sounds/` folder as `data/sounds.pack` (made again only when a sound changed; a
 //!   released player reads the pack, ADR 0105), the material types the material files
 //!   name compiled into `data/materials.pack` ([`materials`], G2: no Slang where the game
-//!   runs), an empty `plugins/` for the vendors' DLLs a player supplies (CLAUDE.md §6), and
-//!   the third parties' notices.
+//!   runs), the textures compressed and the models' colliders cooked into
+//!   `data/derived.pack` ([`derived`], G3a: what the player would otherwise compute on
+//!   every run), an empty `plugins/` for the vendors' DLLs a player supplies (CLAUDE.md §6),
+//!   and the third parties' notices.
 //! - The player run from that folder takes the `data/` beside it as its project
 //!   (`engine_app::run`).
 //!
 //! G1 of ADR 0126 copies the files as the player reads them while a game is developed; G2
-//! compiles the material types ahead; the cooked packs of G3 replace the rest.
+//! compiles the material types ahead; G3a carries the derived data; the cooked packs of
+//! G3b replace the models' and images' sources.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
@@ -32,8 +35,10 @@ use std::time::Instant;
 use engine_reflect::Reflect;
 use engine_scene::{AssetId, LoadError, ValueReport};
 
+pub mod derived;
 pub mod materials;
 
+use engine_assets::DERIVED_PACK;
 use engine_assets::material_pack::MATERIAL_PACK;
 
 /// The build file's name in a game's folder.
@@ -425,6 +430,8 @@ pub enum Step<'a> {
     },
     /// A line cargo printed (`Compiling engine_core …`, a warning).
     Cargo(&'a str),
+    /// Textures compressed and colliders cooked into the derived data pack (G3a).
+    Deriving,
     /// Material types compiling into the material pack (G2): how many.
     Materials {
         /// Types.
@@ -452,6 +459,8 @@ pub struct Built {
     pub files: usize,
     /// The material types in its material pack.
     pub material_types: usize,
+    /// What its derived data pack holds.
+    pub derived: derived::Derived,
     /// Their bytes.
     pub bytes: u64,
     /// Those copied this time (the others were kept).
@@ -502,6 +511,7 @@ pub fn build(
             )
         })?)
     };
+    plan.made.insert(String::from(DERIVED_PACK));
     tell(Step::Planned {
         files: plan.files.len(),
     });
@@ -521,6 +531,18 @@ pub fn build(
     if plan.made.contains(SOUND_PACK) {
         sound_pack(&root.join(SOUNDS), &folder.join("data").join(SOUND_PACK))?;
     }
+    tell(Step::Deriving);
+    let jobs = engine_core::jobs::ThreadPool::builder()
+        .thread_name("engine-build")
+        .build()
+        .map_err(|e| BuildError::new(format!("cannot start worker threads: {e:?}")))?;
+    let derived = derived::derived_pack(
+        root,
+        &plan,
+        &root.join(derived::EDITOR_CACHE),
+        &folder.join("data").join(DERIVED_PACK),
+        Some(&jobs),
+    )?;
     if let Some(shaders) = shaders {
         let key = materials::material_key(root, shaders, &plan, &types);
         let pack = folder.join("data").join(MATERIAL_PACK);
@@ -535,6 +557,7 @@ pub fn build(
         kind,
         files: plan.files.len(),
         material_types: types.len(),
+        derived,
         bytes: written.bytes,
         copied: written.copied,
         removed: written.removed,

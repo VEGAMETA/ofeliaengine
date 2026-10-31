@@ -5204,7 +5204,23 @@ impl PlayerInput {
 /// cache that cannot be opened leaves textures uncompressed, said in the log).
 fn assets(settings: &PlayerSettings) -> crate::Assets {
     let mut assets = crate::Assets::new(settings.project.clone().unwrap_or_default());
-    if let Some(dir) = &settings.derived_data {
+    // A built game's (ADR 0126's G3a): its textures compressed and its colliders cooked at
+    // build time, read from its one file.
+    let pack = settings
+        .project
+        .as_ref()
+        .map(|p| p.join(engine_assets::DERIVED_PACK))
+        .filter(|p| settings.derived_data.is_none() && p.is_file());
+    if let Some(pack) = pack {
+        match engine_assets::DerivedDataCache::open_pack(&pack) {
+            Ok(cache) => assets.set_derived_data(Some(cache)),
+            Err(e) => log::warn!(
+                target: "engine_app::assets",
+                "{}: {e}; textures stay uncompressed",
+                pack.display()
+            ),
+        }
+    } else if let Some(dir) = &settings.derived_data {
         match engine_assets::DerivedDataCache::new(dir) {
             Ok(cache) => assets.set_derived_data(Some(cache)),
             Err(e) => log::warn!(
