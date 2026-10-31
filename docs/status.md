@@ -883,6 +883,9 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E14 G5b, the size report and the zip** (#506, ADR 0126's as-built G5b):
+    `<folder>.report.txt` beside every build (by part, the largest files), `--zip` and
+    Build: Zip the Last Build through Windows' `tar.exe` (no dependency).
   - **E14 G5a, the PSO record from Play** (#505, ADR 0126's as-built G5a): the editor
     merges the material types' entry points drawn into `game.pso.ron` at each Stop; the
     build compiles only those for the types it names (the stripes' pack 696 → 154 KB).

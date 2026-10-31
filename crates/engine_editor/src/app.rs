@@ -1259,6 +1259,7 @@ struct CommandIds {
     ship_game: CommandId,
     run_build: CommandId,
     build_file: CommandId,
+    zip_build: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1512,6 +1513,7 @@ fn commands() -> (Commands, CommandIds) {
         ship_game: c.register("build.ship", "Build", "Ship the Game (shipping profile)"),
         run_build: c.register("build.run", "Build", "Run the Last Build"),
         build_file: c.register("build.file", "Build", "Open the Build File"),
+        zip_build: c.register("build.zip", "Build", "Zip the Last Build"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -12605,6 +12607,19 @@ impl Editor {
     /// program; Open the Build File shows `game.build` in a code tab, made first if need be.
     fn build_command(&mut self, world: &mut World, id: CommandId) {
         let ids = self.ids;
+        if id == ids.zip_build {
+            let Some(folder) = self.last_build.as_ref().and_then(|p| p.parent()) else {
+                self.say(String::from(
+                    "No build yet: Build the Game (Ctrl+Shift+B) first",
+                ));
+                return;
+            };
+            match engine_build::zip_folder(folder) {
+                Ok(zip) => self.say(format!("Zipped: {}", zip.display())),
+                Err(e) => self.say(format!("Not zipped: {e}")),
+            }
+            return;
+        }
         if id == ids.run_build {
             let Some(program) = self.last_build.clone() else {
                 self.say(String::from(
@@ -18568,7 +18583,15 @@ impl Editor {
         self.commands.ran(id);
         let ids = self.ids;
         // The game's build (ADR 0126's G4), from any tab.
-        if [ids.build_game, ids.ship_game, ids.run_build, ids.build_file].contains(&id) {
+        if [
+            ids.build_game,
+            ids.ship_game,
+            ids.run_build,
+            ids.build_file,
+            ids.zip_build,
+        ]
+        .contains(&id)
+        {
             self.build_command(world, id);
             return;
         }

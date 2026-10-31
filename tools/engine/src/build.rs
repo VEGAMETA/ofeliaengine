@@ -17,6 +17,8 @@ pub(crate) struct BuildArgs {
     pub(crate) out: Option<PathBuf>,
     /// The outcome as one line of JSON on stdout (for tools and the Claude Code layer).
     pub(crate) json: bool,
+    /// The folder zipped beside it too.
+    pub(crate) zip: bool,
 }
 
 pub(crate) fn parse_build(args: impl Iterator<Item = String>) -> Result<BuildArgs, String> {
@@ -25,6 +27,7 @@ pub(crate) fn parse_build(args: impl Iterator<Item = String>) -> Result<BuildArg
         kind: None,
         out: None,
         json: false,
+        zip: false,
     };
     let mut dir = None;
     let mut args = args;
@@ -33,6 +36,7 @@ pub(crate) fn parse_build(args: impl Iterator<Item = String>) -> Result<BuildArg
             "--ship" => parsed.kind = Some(Kind::Ship),
             "--build" => parsed.kind = Some(Kind::Build),
             "--json" => parsed.json = true,
+            "--zip" => parsed.zip = true,
             "--out" => {
                 parsed.out = Some(
                     args.next()
@@ -85,6 +89,7 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
         kind: args.kind,
         output: args.out.clone(),
         engine_shaders: Some(PathBuf::from(crate::ENGINE_SHADERS)),
+        zip: args.zip,
     };
     let quiet = args.json;
     let result = engine_build::build(&args.dir, &file, &options, |step| match step {
@@ -106,7 +111,7 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
                     "{{\"ok\":true,\"folder\":{},\"program\":{},\"kind\":{},\"files\":{},\
                      \"material_types\":{},\"textures\":{},\"derived_bytes\":{},\
                      \"bytes\":{},\"copied\":{},\"removed\":{},\
-                     \"compile_seconds\":{:.1},\"seconds\":{:.1}}}",
+                     \"compile_seconds\":{:.1},\"seconds\":{:.1},\"report\":{},\"zip\":{}}}",
                     json(&built.folder.to_string_lossy()),
                     json(&built.program.to_string_lossy()),
                     json(built.kind.profile()),
@@ -118,7 +123,12 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
                     built.copied,
                     built.removed,
                     built.compile_seconds,
-                    built.seconds
+                    built.seconds,
+                    json(&built.report.to_string_lossy()),
+                    built
+                        .zip
+                        .as_ref()
+                        .map_or_else(|| String::from("null"), |z| json(&z.to_string_lossy()))
                 );
             } else {
                 println!(
@@ -138,6 +148,10 @@ pub(crate) fn run_build(args: &BuildArgs) -> Result<ExitCode, String> {
                     built.derived.bytes as f64 / 1e6,
                     built.derived.seconds
                 );
+                println!("size report: {}", built.report.display());
+                if let Some(zip) = &built.zip {
+                    println!("zipped: {}", zip.display());
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -168,7 +182,8 @@ mod tests {
     #[test]
     fn parses_build_commands() {
         let parse = |line: &str| parse_build(line.split_whitespace().map(str::to_owned));
-        let a = parse("../game --ship --json --out D:/out").unwrap();
+        let a = parse("../game --ship --json --zip --out D:/out").unwrap();
+        assert!(a.zip);
         assert_eq!(a.dir, PathBuf::from("../game"));
         assert_eq!(a.kind, Some(Kind::Ship));
         assert_eq!(a.out, Some(PathBuf::from("D:/out")));

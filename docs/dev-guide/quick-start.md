@@ -157,12 +157,15 @@ In the editor: **Ctrl+Shift+B**. From a terminal:
 ```text
 ofeliaengine build            a folder players run: builds/<name>/
 ofeliaengine build --ship     the same, built for shipping (slower to build, faster to run)
+ofeliaengine build --zip      and zipped beside it: builds/<name>.zip
 ```
 
 - **What you get:** `builds/<name>/<name>.exe`, its `data/` (your scenes and every file they
   use, your sounds as `sounds.pack`), an empty `plugins/` (where players put NVIDIA's or
   Intel's DLLs for DLSS or XeSS), and `THIRD_PARTY_NOTICES.txt` (keep it with the game).
-  Zip the folder and it runs anywhere on Windows 11 with a Vulkan 1.3 GPU.
+  Zip the folder (`--zip`, or Build: Zip the Last Build in the editor) and it runs
+  anywhere on Windows 11 with a Vulkan 1.3 GPU. `builds/<name>.report.txt` says what takes
+  the space: each pack and folder, and the largest files.
 - **`game.build`** says what goes in: `start` (the first scene), `scenes` (the others),
   `always` (folders and files your scripts load by path), `kind` (`Build` or `Ship`) and
   `output` (`builds`, or any folder). `ofeliaengine new` makes it; edit it by hand or let

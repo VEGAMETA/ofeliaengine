@@ -465,6 +465,8 @@ pub struct Options {
     /// The engine's shader folder (`forward.slang`, which material types compile with):
     /// needed when the game has typed materials.
     pub engine_shaders: Option<PathBuf>,
+    /// The folder zipped as `<folder>.zip` beside it too (G5b).
+    pub zip: bool,
 }
 
 /// A step of a build, as it goes: cargo's lines while the game builds, then the files.
@@ -508,6 +510,10 @@ pub struct Built {
     pub material_types: usize,
     /// What its derived data pack holds.
     pub derived: derived::Derived,
+    /// Its size report beside the folder (`<folder>.report.txt`, G5b).
+    pub report: PathBuf,
+    /// Its zip, when asked for.
+    pub zip: Option<PathBuf>,
     /// Their bytes.
     pub bytes: u64,
     /// Those copied this time (the others were kept).
@@ -602,8 +608,18 @@ pub fn build(
             materials::material_pack(root, shaders, &types, key, &pack)?;
         }
     }
+    let report = beside(&folder, "report.txt");
+    std::fs::write(&report, size_report(&folder))
+        .map_err(|e| BuildError::new(format!("{}: {e}", report.display())))?;
+    let zip = if options.zip {
+        Some(zip_folder(&folder)?)
+    } else {
+        None
+    };
     Ok(Built {
         program: folder.join(format!("{}.exe", folder_name(&file.name))),
+        report,
+        zip,
         folder,
         kind,
         files: plan.files.len(),
@@ -803,6 +819,112 @@ fn sound_pack(folder: &Path, pack: &Path) -> Result<(), BuildError> {
         .map_err(|e| BuildError::new(format!("{}: {e}", pack.display())))
 }
 
+/// The file `<folder's name>.<extension>` beside `folder`.
+fn beside(folder: &Path, extension: &str) -> PathBuf {
+    let name = folder
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    folder.with_file_name(format!("{name}.{extension}"))
+}
+
+/// How many of the largest files a size report lists.
+const REPORT_LARGEST: usize = 15;
+
+/// A build folder's size report (G5b): its bytes in all, then by part (the program, each
+/// pack, each folder of `data/`), largest first, then its largest files.
+pub fn size_report(folder: &Path) -> String {
+    use std::fmt::Write as _;
+    let mut files = Vec::new();
+    walk_all(folder, folder, &mut files);
+    let mut sized: Vec<(String, u64)> = files
+        .into_iter()
+        .map(|f| {
+            let bytes = std::fs::metadata(folder.join(&f)).map_or(0, |m| m.len());
+            (f, bytes)
+        })
+        .collect();
+    let total: u64 = sized.iter().map(|(_, b)| b).sum();
+    let mut parts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for (path, bytes) in &sized {
+        let part = match path.split('/').collect::<Vec<_>>().as_slice() {
+            ["data", file] => format!("data/{file}"),
+            ["data", dir, ..] => format!("data/{dir}/"),
+            [file] => (*file).to_owned(),
+            [dir, ..] => format!("{dir}/"),
+            [] => String::new(),
+        };
+        *parts.entry(part).or_default() += bytes;
+    }
+    let mut parts: Vec<(String, u64)> = parts.into_iter().collect();
+    parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sized.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mb = |b: u64| b as f64 / 1e6;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{}: {:.1} MB in {} files",
+        folder.display(),
+        mb(total),
+        sized.len()
+    );
+    let _ = writeln!(out, "\nBy part:");
+    for (part, bytes) in &parts {
+        let share = if total == 0 {
+            0.0
+        } else {
+            *bytes as f64 * 100.0 / total as f64
+        };
+        let _ = writeln!(out, "{:>10.2} MB {share:>5.1} %  {part}", mb(*bytes));
+    }
+    let _ = writeln!(out, "\nLargest files:");
+    for (path, bytes) in sized.iter().take(REPORT_LARGEST) {
+        let _ = writeln!(out, "{:>10.2} MB  {path}", mb(*bytes));
+    }
+    out
+}
+
+/// `folder` zipped as `<folder>.zip` beside it by Windows' own `tar` (no dependency): the
+/// folder whole, under its own name.
+///
+/// # Errors
+///
+/// `tar` missing or failing.
+pub fn zip_folder(folder: &Path) -> Result<PathBuf, BuildError> {
+    let zip = beside(folder, "zip");
+    let _ = std::fs::remove_file(&zip);
+    let (Some(parent), Some(name)) = (folder.parent(), folder.file_name()) else {
+        return Err(BuildError::new(format!(
+            "{}: no parent folder",
+            folder.display()
+        )));
+    };
+    let tar = std::env::var_os("SystemRoot")
+        .map(|r| PathBuf::from(r).join("System32").join("tar.exe"))
+        .filter(|t| t.is_file())
+        .unwrap_or_else(|| PathBuf::from("tar"));
+    let status = Command::new(tar)
+        .arg("-a")
+        .arg("-c")
+        .arg("-f")
+        .arg(&zip)
+        .arg("-C")
+        .arg(parent)
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| BuildError::new(format!("tar did not start: {e}")))?;
+    if !status.status.success() {
+        return Err(BuildError::new(format!(
+            "{}: {}",
+            zip.display(),
+            String::from_utf8_lossy(&status.stderr).trim()
+        )));
+    }
+    Ok(zip)
+}
+
 /// The first `.scene` under `at`, by its path from `root`, in the folders' sorted order
 /// (dot-folders, `target` and `builds` passed over).
 fn first_scene(root: &Path, at: &Path) -> Option<String> {
@@ -955,6 +1077,32 @@ mod tests {
                 },
             ]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder's size report by part and largest file; the folder zipped beside it.
+    #[test]
+    fn a_folder_is_reported_by_size_and_zipped() {
+        let root = project("report");
+        let folder = root.join("builds/game");
+        write(&folder, "game.exe", &"x".repeat(3000));
+        write(&folder, "data/derived.pack", &"x".repeat(5000));
+        write(&folder, "data/scenes/main.scene", &"x".repeat(1000));
+        write(&folder, "data/scenes/other.scene", &"x".repeat(1000));
+        let report = size_report(&folder);
+        assert!(report.contains("0.0 MB in 4 files"), "{report}");
+        let parts: Vec<&str> = report
+            .lines()
+            .skip_while(|l| *l != "By part:")
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(|l| l.rsplit("  ").next().unwrap())
+            .collect();
+        assert_eq!(parts, ["data/derived.pack", "game.exe", "data/scenes/"]);
+        let zip = zip_folder(&folder).unwrap();
+        assert_eq!(zip, root.join("builds/game.zip"));
+        let bytes = std::fs::read(&zip).unwrap();
+        assert_eq!(&bytes[..4], b"PK\x03\x04", "a zip");
         let _ = std::fs::remove_dir_all(&root);
     }
 

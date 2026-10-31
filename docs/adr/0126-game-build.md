@@ -282,6 +282,18 @@ derived data, at load in the editor), and the paths API.
   look drawing meanwhile); a test of the record written at Stop (the build's side is
   tested).
 
+## As built (G5b, 2026-11-01): the size report and the zip
+
+- **Every build** writes `<folder>.report.txt` beside its folder (not shipped): its bytes
+  in all, by part (the program, each pack, each folder of `data/`) largest first with its
+  share, and its 15 largest files (`engine_build::size_report`). `--json` gains `report`.
+- **A zip** of the folder, `<folder>.zip` beside it, by `ofeliaengine build --zip` or the
+  editor's **Build: Zip the Last Build** (`engine_build::zip_folder`): Windows' own
+  `tar.exe -a` (bsdtar, in System32 since Windows 10 1803), so no zip dependency.
+  `--json` gains `zip`.
+- **Tests:** a folder's report by part and by file; the folder zipped (a `PK` file).
+- **Left (G5c):** Luau scripts as bytecode.
+
 ## Questions for the team
 
 1. **What form the shipped content takes.**
