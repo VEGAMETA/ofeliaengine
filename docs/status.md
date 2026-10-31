@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E14 G1, `ofeliaengine build`** (#PR, ADR 0126's as-built; ADR accepted, the team's
+  - **E14 G1, `ofeliaengine build`** (#499, ADR 0126's as-built; ADR accepted, the team's
     1а–5а): the `engine_build` crate (the build file, the walk from the scenes to every
     file they reach, cargo in `release` or `shipping`, the folder with `data/`, the sound
     pack, `plugins/` and the notices), `ofeliaengine build [--ship] [--json]`, `new`
