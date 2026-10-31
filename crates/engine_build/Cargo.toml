@@ -1,0 +1,18 @@
+[package]
+name = "engine_build"
+description = "The one-button game build (ADR 0126): the build file, the walk from the scenes to every asset they reach, the game built by cargo and its folder written."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+engine_assets.workspace = true
+engine_reflect.workspace = true
+engine_scene.workspace = true

@@ -22,6 +22,7 @@ engine_core.workspace = true
 engine_crash.workspace = true
 engine_log.workspace = true
 # Localized text (ADR 0102): `loc build` and `loc check`.
+engine_build.workspace = true
 engine_loc.workspace = true
 # `save dump` and `save info` (ADR 0104).
 engine_save.workspace = true

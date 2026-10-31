@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E14 G1, `ofeliaengine build`** (#499, ADR 0126's as-built; ADR accepted, the team's
+    1а–5а): the `engine_build` crate (the build file, the walk from the scenes to every
+    file they reach, cargo in `release` or `shipping`, the folder with `data/`, the sound
+    pack, `plugins/` and the notices), `ofeliaengine build [--ship] [--json]`, `new`
+    writing `game.build` and ignoring `/builds/`, a build's program finding its `data/`;
+    the quick start's game built in 101 s (15.7 s again) and run from its folder.
   - **E14's research and ADR 0126, the one-button game build** (#498, proposed, 5 questions):
     `docs/research/game-build.md` (Godot's presets and PCKs, Unity's Build Profiles,
     Unreal's cook and IoStore, Fyrox's exporter, Bevy); a committed build file, the scenes

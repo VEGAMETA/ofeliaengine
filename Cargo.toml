@@ -22,6 +22,7 @@ engine_core = { path = "crates/engine_core" }
 engine_collision = { path = "crates/engine_collision" }
 engine_brush = { path = "crates/engine_brush" }
 engine_text = { path = "crates/engine_text" }
+engine_build = { path = "crates/engine_build" }
 engine_loc = { path = "crates/engine_loc" }
 engine_ecs = { path = "crates/engine_ecs" }
 engine_input = { path = "crates/engine_input" }

@@ -373,10 +373,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_build"
+version = "0.0.0"
+dependencies = [
+ "engine_assets",
+ "engine_reflect",
+ "engine_scene",
+ "engine_workspace_hack",
+]
+
+[[package]]
 name = "engine_cli"
 version = "0.0.0"
 dependencies = [
  "engine_assets",
+ "engine_build",
  "engine_core",
  "engine_crash",
  "engine_loc",

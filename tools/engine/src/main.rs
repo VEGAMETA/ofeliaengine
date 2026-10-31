@@ -16,6 +16,7 @@
 //! ofeliaengine sounds build <DIR> -o <OUT.pack>    a sounds folder into a sound pack, every
 //!                                                  file as it is (ADR 0105)
 //! ofeliaengine new <DIR>                           a game started from the quick start
+//! ofeliaengine build [DIR] [--ship] [--json]       the game built into its folder (ADR 0126)
 //! ofeliaengine edit [DIR]                          a game in its editor (ADR 0107)
 //! ofeliaengine save dump <FILE>                   a save as text, either encoding (ADR 0104)
 //! ofeliaengine save info <FILE>                    a save's header
@@ -26,6 +27,7 @@
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod build;
 mod edit;
 mod loc;
 mod new;
@@ -82,6 +84,14 @@ usage:
                                                    each lacks against the source; with --code,
                                                    loc!(\"id\") (Rust) and loc(\"id\") (Luau)
                                                    uses that are not defined, messages unused
+  ofeliaengine build [DIR] [--ship | --build] [--out <DIR>] [--json]
+                                                   the game at DIR (.) built into
+                                                   builds/<name>/ (ADR 0126): its program in
+                                                   the release profile (--ship: shipping),
+                                                   data/ with its scenes and every asset they
+                                                   reach, plugins/, the notices; game.build
+                                                   made the first time; --json: the outcome
+                                                   as one line of JSON
   ofeliaengine new <DIR> [--engine <PATH>] [--name <NAME>]
                                                    a game started from the quick start
                                                    (docs/dev-guide/quick-start.md): its
@@ -137,6 +147,7 @@ enum Command {
     Loc(loc::LocArgs),
     Sounds(sounds::SoundsArgs),
     New(new::NewArgs),
+    Build(build::BuildArgs),
     Edit(edit::EditArgs),
     Assets { dir: PathBuf, json: bool },
     Save { info: bool, file: PathBuf },
@@ -168,6 +179,7 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("loc") => loc::parse_loc(args).map(Command::Loc),
         Some("sounds") => sounds::parse_sounds(args).map(Command::Sounds),
         Some("new") => new::parse_new(args).map(Command::New),
+        Some("build") => build::parse_build(args).map(Command::Build),
         Some("edit") => edit::parse_edit(args).map(Command::Edit),
         Some("assets") => {
             let (mut dir, mut json) = (None, false);
@@ -544,6 +556,7 @@ fn main() -> ExitCode {
         Command::Loc(args) => loc::run_loc(args),
         Command::Sounds(args) => sounds::run_sounds(args),
         Command::New(args) => new::run_new(args),
+        Command::Build(args) => build::run_build(args),
         Command::Edit(args) => edit::run_edit(args),
         Command::Assets { dir, json } => assets(dir, *json),
         Command::Save { info, file } => save(*info, file),
@@ -690,6 +703,7 @@ mod tests {
             | Command::Loc(_)
             | Command::Sounds(_)
             | Command::New(_)
+            | Command::Build(_)
             | Command::Edit(_)
             | Command::Assets { .. }
             | Command::Save { .. } => Err(String::from("not a shaders command")),
@@ -703,6 +717,7 @@ mod tests {
             | Command::Loc(_)
             | Command::Sounds(_)
             | Command::New(_)
+            | Command::Build(_)
             | Command::Edit(_)
             | Command::Assets { .. }
             | Command::Save { .. } => Err(String::from("not a cook command")),
