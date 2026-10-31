@@ -1037,6 +1037,17 @@ impl AnimDoc {
         self.file.layers.get(&self.layer)
     }
 
+    /// The entry's name of the machine the state selected alone plays (where a group made by
+    /// Ctrl+G starts; ADR 0124's E12-5d-2c-2).
+    pub(crate) fn grouped_entry(&self) -> Option<&str> {
+        let id = (self.selected.len() == 1)
+            .then(|| self.selected.iter().next())
+            .flatten()?;
+        let pose = &self.file.states.get(id)?.pose;
+        let entry = &self.file.nodes.get(pose)?.entry;
+        Some(self.file.states.get(entry)?.name.as_str())
+    }
+
     /// The names of the states whose machines are entered, outermost first (the bar's crumbs,
     /// ADR 0124's E12-5d-2c), into `out` (its room kept).
     pub(crate) fn crumbs<'a>(&'a self, out: &mut Vec<&'a str>) {
@@ -1787,6 +1798,281 @@ fn remove_tree(file: &mut AnimGraphFile, id: &str) {
     }
 }
 
+/// States `a` and `b` in reading order on their canvas: top to bottom, then left to right
+/// (then by id).
+fn reading_order(file: &AnimGraphFile, a: &str, b: &str) -> core::cmp::Ordering {
+    let at = |id: &str| file.states.get(id).map_or([0.0, 0.0], |s| s.at);
+    let (p, q) = (at(a), at(b));
+    p[1].total_cmp(&q[1])
+        .then(p[0].total_cmp(&q[0]))
+        .then(a.cmp(b))
+}
+
+/// The top left of states `ids`' boxes.
+fn corner_of(file: &AnimGraphFile, ids: &[String]) -> [f32; 2] {
+    ids.iter()
+        .filter_map(|id| file.states.get(id))
+        .fold([f32::MAX, f32::MAX], |c, s| {
+            [c[0].min(s.at[0]), c[1].min(s.at[1])]
+        })
+}
+
+/// Of transitions `ids` (in that order), each the same in every part as an earlier one taken
+/// out (two states grouped leaving for one place on one condition: one transition).
+fn merge_same(file: &mut AnimGraphFile, ids: &[String]) {
+    let mut gone: Vec<String> = Vec::new();
+    for (k, id) in ids.iter().enumerate() {
+        let Some(t) = file.transitions.get(id) else {
+            continue;
+        };
+        let same = ids[..k].iter().any(|e| {
+            e != id && !gone.contains(e) && file.transitions.get(e).is_some_and(|x| x == t)
+        });
+        if same {
+            gone.push(id.clone());
+        }
+    }
+    for id in gone {
+        file.transitions.remove(&id);
+    }
+}
+
+/// States `picked` of machine `machine` grouped into a machine of their own (Ctrl+G; ADR
+/// 0124's E12-5d-2c-2), played by a new state of `machine` named `Group` (numbered where
+/// taken) at their boxes' middle, the new machine's Any State box above and left of them.
+/// The transitions between them go with them; those into them from the rest of `machine`
+/// (or its Any State) go into the new state, those out of them leave it, the same ones
+/// merged; one from `machine`'s Any State into one of them is also kept inside (the new
+/// machine's Any State) for the others. The new machine starts at `machine`'s entry where it
+/// is among them (the new state `machine`'s entry then), else at the state most transitions
+/// came into, else at the first in reading order. The new state's id, and how many
+/// transitions now come in at that entry rather than at their own state; none where no state
+/// of `machine` is picked.
+fn group_into_machine(
+    file: &mut AnimGraphFile,
+    machine: &str,
+    picked: &BTreeSet<String>,
+) -> Option<(String, usize)> {
+    let mut inner: Vec<String> = picked
+        .iter()
+        .filter(|id| file.states.get(*id).is_some_and(|s| s.machine == machine))
+        .cloned()
+        .collect();
+    if inner.is_empty() {
+        return None;
+    }
+    inner.sort_by(|a, b| reading_order(file, a, b));
+    let is_in = |id: &str| inner.iter().any(|k| k == id);
+    let n = inner.len() as f32;
+    let middle = inner
+        .iter()
+        .filter_map(|id| file.states.get(id))
+        .fold([0.0, 0.0], |m, s| [m[0] + s.at[0] / n, m[1] + s.at[1] / n]);
+    let corner = corner_of(file, &inner);
+    let outer_entry = file
+        .nodes
+        .get(machine)
+        .map(|m| m.entry.clone())
+        .unwrap_or_default();
+    let entry = if is_in(&outer_entry) {
+        outer_entry.clone()
+    } else {
+        let mut best = (0, inner[0].clone());
+        for id in &inner {
+            let came = file
+                .transitions
+                .values()
+                .filter(|t| t.to == *id && !is_in(&t.from))
+                .count();
+            if came > best.0 {
+                best = (came, id.clone());
+            }
+        }
+        best.1
+    };
+    let inside = fresh_id(file);
+    file.nodes.insert(
+        inside.clone(),
+        NodeFile {
+            kind: NodeKind::Machine,
+            at: [corner[0] - 180.0, corner[1] - 90.0],
+            entry: entry.clone(),
+            ..NodeFile::default()
+        },
+    );
+    for id in &inner {
+        if let Some(s) = file.states.get_mut(id) {
+            s.machine.clone_from(&inside);
+        }
+    }
+    let name = fresh_state_name(file, machine, "Group");
+    let group = fresh_id(file);
+    file.states.insert(
+        group.clone(),
+        StateFile {
+            name,
+            machine: machine.to_owned(),
+            pose: inside,
+            at: middle,
+        },
+    );
+    if is_in(&outer_entry)
+        && let Some(m) = file.nodes.get_mut(machine)
+    {
+        m.entry.clone_from(&group);
+    }
+    let mut touched = Vec::new();
+    let mut redirected = 0;
+    let ids: Vec<String> = file.transitions.keys().cloned().collect();
+    for id in ids {
+        let Some(t) = file.transitions.get(&id).cloned() else {
+            continue;
+        };
+        let (from_in, to_in) = (is_in(&t.from), is_in(&t.to));
+        if to_in && !from_in {
+            if t.to != entry {
+                redirected += 1;
+            }
+            // From any state: the others inside still go there.
+            if t.from.is_empty() && inner.len() > 1 {
+                let copy = fresh_id(file);
+                file.transitions.insert(copy, t);
+            }
+            if let Some(t) = file.transitions.get_mut(&id) {
+                t.to.clone_from(&group);
+            }
+            touched.push(id);
+        } else if from_in && !to_in {
+            if let Some(t) = file.transitions.get_mut(&id) {
+                t.from.clone_from(&group);
+            }
+            touched.push(id);
+        }
+    }
+    merge_same(file, &touched);
+    Some((group, redirected))
+}
+
+/// State `group` playing a machine taken apart (Ctrl+Alt+G; ADR 0124's E12-5d-2c-2): the
+/// machine's states move into `group`'s machine (renamed where a name is taken there), their
+/// boxes' top left where `group`'s was, the transitions between them kept; those into
+/// `group` go into the machine's entry, and those out of it and the machine's own Any
+/// State's leave each of its states (but not into the state they leave, and not where the
+/// outer Any State already goes there the same way), the same ones merged; the outer
+/// machine's entry where `group` was it. `group` and its machine go. The states moved, in
+/// reading order; why not where it cannot be.
+fn take_apart(file: &mut AnimGraphFile, group: &str) -> Result<Vec<String>, &'static str> {
+    let Some(g) = file.states.get(group).cloned() else {
+        return Err("");
+    };
+    if !is_machine(file, &g.pose) {
+        return Err("Ctrl+Alt+G takes apart a state playing a machine");
+    }
+    let shared = file.states.values().filter(|s| s.pose == g.pose).count() > 1
+        || file.layers.values().any(|l| l.root == g.pose);
+    if shared {
+        return Err("Its machine is played elsewhere too, so it stays whole");
+    }
+    let mut inner: Vec<String> = file
+        .states
+        .iter()
+        .filter(|(_, s)| s.machine == g.pose)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if inner.is_empty() {
+        return Err("Its machine has no states to take out");
+    }
+    inner.sort_by(|a, b| reading_order(file, a, b));
+    let is_in = |id: &str| inner.iter().any(|k| k == id);
+    let corner = corner_of(file, &inner);
+    let entry = file
+        .nodes
+        .get(&g.pose)
+        .map(|m| m.entry.clone())
+        .filter(|e| is_in(e))
+        .unwrap_or_else(|| inner[0].clone());
+    // What comes in and what leaves, read before anything moves: the machine's own Any
+    // State's transitions look like the outer one's once its states are out.
+    let into: Vec<String> = file
+        .transitions
+        .iter()
+        .filter(|(_, t)| t.to == group)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let leaving: Vec<String> = file
+        .transitions
+        .iter()
+        .filter(|(_, t)| t.from == group || (t.from.is_empty() && is_in(&t.to)))
+        .map(|(id, _)| id.clone())
+        .collect();
+    file.states.remove(group);
+    for id in &inner {
+        let Some(name) = file.states.get(id).map(|s| s.name.clone()) else {
+            continue;
+        };
+        let name = fresh_state_name(file, &g.machine, &name);
+        if let Some(s) = file.states.get_mut(id) {
+            s.machine.clone_from(&g.machine);
+            s.name = name;
+            s.at = [s.at[0] - corner[0] + g.at[0], s.at[1] - corner[1] + g.at[1]];
+        }
+    }
+    let mut touched = Vec::new();
+    for id in into {
+        let Some(t) = file.transitions.get_mut(&id) else {
+            continue;
+        };
+        if t.from == group {
+            file.transitions.remove(&id);
+            continue;
+        }
+        t.to.clone_from(&entry);
+        touched.push(id);
+    }
+    let leaving: Vec<TransitionFile> = leaving
+        .iter()
+        .filter_map(|id| file.transitions.remove(id))
+        .collect();
+    for t in leaving {
+        for x in &inner {
+            if *x == t.to {
+                continue;
+            }
+            let copy = TransitionFile {
+                from: x.clone(),
+                ..t.clone()
+            };
+            // Where the outer Any State goes there the same way already.
+            let any = TransitionFile {
+                from: String::new(),
+                ..copy.clone()
+            };
+            if file.transitions.values().any(|o| *o == any) {
+                continue;
+            }
+            let k = fresh_id(file);
+            file.transitions.insert(k.clone(), copy);
+            touched.push(k);
+        }
+    }
+    // The moved states' own transitions first, so the copies are what merges away.
+    let mut order: Vec<String> = file
+        .transitions
+        .iter()
+        .filter(|(id, t)| !touched.contains(id) && (is_in(&t.from) || is_in(&t.to)))
+        .map(|(id, _)| id.clone())
+        .collect();
+    order.extend(touched);
+    merge_same(file, &order);
+    if let Some(m) = file.nodes.get_mut(&g.machine)
+        && m.entry == group
+    {
+        m.entry.clone_from(&entry);
+    }
+    file.nodes.remove(&g.pose);
+    Ok(inner)
+}
+
 /// What pose `pose` plays, as its state's box says it, into `out`: a clip's name, `Blend1d
 /// speed: Walk · Run`, `Machine`; at most [`SUMMARY_MAX`] characters.
 fn pose_summary(file: &AnimGraphFile, pose: &str, out: &mut String) {
@@ -2296,6 +2582,82 @@ impl GraphDoc {
         let (before, after) = self.edit_anim(|f| remove(f, &states, &transitions))?;
         Some(Outcome::Edited {
             name,
+            before,
+            after,
+        })
+    }
+
+    /// The selected states of the machine shown grouped into a machine of their own (Ctrl+G;
+    /// ADR 0124's E12-5d-2c-2), the state that plays it selected alone, as one step; with how
+    /// many transitions now come in at the new machine's entry rather than at their own state.
+    pub(crate) fn group_states(&mut self) -> Option<(Outcome, usize)> {
+        let anim = self.anim.as_deref()?;
+        let shown = anim.machine.clone();
+        let picked = anim.selected.clone();
+        if !picked
+            .iter()
+            .any(|id| anim.file.states.get(id).is_some_and(|s| s.machine == shown))
+        {
+            return Some((
+                Outcome::Refused("Select the states to group into a machine (Ctrl+G)"),
+                0,
+            ));
+        }
+        let mut made = None;
+        let (before, after) = self.edit_anim(|f| made = group_into_machine(f, &shown, &picked))?;
+        let (group, redirected) = made?;
+        let anim = self.anim.as_deref_mut()?;
+        anim.clear_selection();
+        anim.selected.insert(group);
+        Some((
+            Outcome::Edited {
+                name: "Group States",
+                before,
+                after,
+            },
+            redirected,
+        ))
+    }
+
+    /// The selected states playing machines taken apart (Ctrl+Alt+G; ADR 0124's E12-5d-2c-2):
+    /// their machines' states come out into the machine shown, selected, as one step.
+    pub(crate) fn ungroup_states(&mut self) -> Option<Outcome> {
+        let anim = self.anim.as_deref()?;
+        let shown = anim.machine.clone();
+        let groups: Vec<String> = anim
+            .selected
+            .iter()
+            .filter(|id| {
+                anim.file
+                    .states
+                    .get(*id)
+                    .is_some_and(|s| s.machine == shown && is_machine(&anim.file, &s.pose))
+            })
+            .cloned()
+            .collect();
+        if groups.is_empty() {
+            return Some(Outcome::Refused(
+                "Select a state playing a machine to take apart (Ctrl+Alt+G)",
+            ));
+        }
+        let mut moved = Vec::new();
+        let mut why = None;
+        let edit = self.edit_anim(|f| {
+            for g in &groups {
+                match take_apart(f, g) {
+                    Ok(states) => moved.extend(states),
+                    Err(w) => why = Some(w),
+                }
+            }
+        });
+        let Some((before, after)) = edit else {
+            return why.filter(|w| !w.is_empty()).map(Outcome::Refused);
+        };
+        let anim = self.anim.as_deref_mut()?;
+        anim.clear_selection();
+        anim.selected.extend(moved);
+        Some(Outcome::Edited {
+            name: "Ungroup States",
             before,
             after,
         })
@@ -4194,6 +4556,186 @@ mod tests {
         assert!(d.anim_reset(AnimRow::MaskWeight).is_some());
         assert_eq!(anim(&d).mask_weight(2), 1.0);
         assert!(!anim(&d).changed(AnimRow::MaskWeight));
+    }
+
+    /// `file()` with Run at (600, 0) and three transitions more: Walk into Run, Run back to
+    /// Idle the same way as Walk does, and Any State into Run on `jump`.
+    fn three_states() -> AnimGraphFile {
+        let mut f = file();
+        f.states.insert(
+            String::from("run"),
+            StateFile {
+                name: String::from("Run"),
+                machine: String::from("m"),
+                pose: String::from("cw"),
+                at: [600.0, 0.0],
+            },
+        );
+        for (id, from, to, when) in [
+            ("t3", "walk", "run", "speed > 3"),
+            ("t4", "run", "idle", "speed <= 0.1"),
+            ("t5", "", "run", "jump"),
+        ] {
+            f.transitions.insert(
+                String::from(id),
+                TransitionFile {
+                    from: String::from(from),
+                    to: String::from(to),
+                    when: String::from(when),
+                    ..TransitionFile::default()
+                },
+            );
+        }
+        f
+    }
+
+    fn transition<'a>(f: &'a AnimGraphFile, from: &str, to: &str) -> Vec<&'a TransitionFile> {
+        f.transitions
+            .values()
+            .filter(|t| t.from == from && t.to == to)
+            .collect()
+    }
+
+    /// ADR 0124's E12-5d-2c-2: Ctrl+G groups the selected states into a machine played by a
+    /// new state, Group: the transitions between them go inside, those into them come into
+    /// Group (the one into another state than its entry counted), those out of them leave it
+    /// (the same two merged), Any State's into one of them is kept inside for the others too;
+    /// Ctrl+Alt+G takes it apart again: its states back, what came into Group into its entry,
+    /// what left it leaving each of them.
+    #[test]
+    fn states_grouped_into_a_machine_and_taken_apart() {
+        let mut d = GraphDoc::new_anim(
+            AssetId::new(),
+            "anim/hero.agraph",
+            three_states(),
+            AssetPaths::new(),
+        );
+        // Nothing selected: refused.
+        assert!(matches!(d.group_states(), Some((Outcome::Refused(_), 0))));
+        anim_mut(&mut d)
+            .selected
+            .extend([String::from("walk"), String::from("run")]);
+        let Some((Outcome::Edited { name, .. }, redirected)) = d.group_states() else {
+            panic!("a step");
+        };
+        assert_eq!(name, "Group States");
+        assert_eq!(redirected, 1, "Any State's into Run comes in at Walk now");
+        let a = anim(&d);
+        assert_eq!(a.selected.len(), 1);
+        let group = a.selected.iter().next().unwrap().clone();
+        let g = &a.file.states[&group];
+        assert_eq!((g.name.as_str(), g.machine.as_str()), ("Group", "m"));
+        assert_eq!(g.at, [450.0, 0.0], "at their middle");
+        let inside = g.pose.clone();
+        let m = &a.file.nodes[&inside];
+        assert_eq!((m.kind, m.entry.as_str()), (NodeKind::Machine, "walk"));
+        assert_eq!(m.at, [120.0, -90.0], "Any State above and left of them");
+        assert_eq!(a.file.states["walk"].machine, inside);
+        assert_eq!(a.file.states["run"].machine, inside);
+        assert_eq!(a.file.nodes["m"].entry, "idle", "the outer entry stays");
+        assert_eq!(a.grouped_entry(), Some("Walk"));
+        let f = &a.file;
+        assert_eq!(transition(f, "idle", &group).len(), 1);
+        assert_eq!(
+            transition(f, &group, "idle").len(),
+            1,
+            "Walk's and Run's merged"
+        );
+        assert_eq!(transition(f, "walk", "run").len(), 1, "kept inside");
+        assert_eq!(transition(f, "", &group).len(), 1, "the outer Any State's");
+        assert_eq!(transition(f, "", "run").len(), 1, "and kept inside");
+        assert_eq!(f.transitions.len(), 5);
+        // Tab enters it.
+        assert!(d.anim_tab().is_ok());
+        assert_eq!(anim(&d).machine, inside);
+        assert_eq!(anim(&d).file.states_of(&inside).count(), 2);
+        anim_mut(&mut d).clear_selection();
+        assert!(d.anim_tab().is_ok(), "back out, Group selected");
+        // Ctrl+Alt+G: apart again.
+        let Some(Outcome::Edited { name, .. }) = d.ungroup_states() else {
+            panic!("a step");
+        };
+        assert_eq!(name, "Ungroup States");
+        let a = anim(&d);
+        assert!(!a.file.states.contains_key(&group));
+        assert!(!a.file.nodes.contains_key(&inside));
+        assert_eq!(a.file.states_of("m").count(), 3);
+        assert_eq!(
+            a.selected.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["run", "walk"]
+        );
+        assert_eq!(a.file.states["walk"].at, [450.0, 0.0], "where Group was");
+        assert_eq!(a.file.states["run"].at, [750.0, 0.0]);
+        let f = &a.file;
+        assert_eq!(transition(f, "idle", "walk").len(), 1);
+        assert_eq!(transition(f, "walk", "idle").len(), 1);
+        assert_eq!(transition(f, "run", "idle").len(), 1);
+        assert_eq!(transition(f, "walk", "run").len(), 2, "its own and jump's");
+        assert_eq!(
+            transition(f, "", "walk").len(),
+            1,
+            "Any State's into the entry"
+        );
+        assert!(transition(f, "", "run").is_empty());
+    }
+
+    /// Grouping a machine's entry makes the group its entry, starting inside where it did;
+    /// taking a group apart renames a state whose name is taken outside and gives the entry
+    /// back; what plays no machine is not taken apart.
+    #[test]
+    fn grouping_keeps_the_entry_and_taking_apart_keeps_names_apart() {
+        let mut f = three_states();
+        let picked: BTreeSet<String> = [String::from("idle")].into();
+        let (group, redirected) = group_into_machine(&mut f, "m", &picked).unwrap();
+        assert_eq!(redirected, 0);
+        assert_eq!(f.nodes["m"].entry, group);
+        let inside = f.states[&group].pose.clone();
+        assert_eq!(f.nodes[&inside].entry, "idle");
+        assert_eq!(transition(&f, "", "idle").len(), 0, "no copy for one state");
+        // An Idle outside meanwhile.
+        f.states.insert(
+            String::from("idle2"),
+            StateFile {
+                name: String::from("Idle"),
+                machine: String::from("m"),
+                pose: String::from("ci"),
+                at: [0.0, 200.0],
+            },
+        );
+        assert_eq!(
+            take_apart(&mut f, "walk"),
+            Err("Ctrl+Alt+G takes apart a state playing a machine")
+        );
+        assert_eq!(take_apart(&mut f, &group), Ok(vec![String::from("idle")]));
+        assert_eq!(f.states["idle"].name, "Idle 2");
+        assert_eq!(f.states["idle"].machine, "m");
+        assert_eq!(f.nodes["m"].entry, "idle");
+        assert!(!f.nodes.contains_key(&inside));
+        assert_eq!(transition(&f, "idle", "walk").len(), 1);
+        assert_eq!(transition(&f, "walk", "idle").len(), 1);
+        assert_eq!(transition(&f, "run", "idle").len(), 1);
+    }
+
+    /// A machine another state also plays stays whole.
+    #[test]
+    fn a_machine_played_twice_is_not_taken_apart() {
+        let mut f = three_states();
+        let picked: BTreeSet<String> = [String::from("walk")].into();
+        let (group, _) = group_into_machine(&mut f, "m", &picked).unwrap();
+        let inside = f.states[&group].pose.clone();
+        f.states.insert(
+            String::from("twin"),
+            StateFile {
+                name: String::from("Twin"),
+                machine: String::from("m"),
+                pose: inside,
+                at: [0.0, 300.0],
+            },
+        );
+        assert_eq!(
+            take_apart(&mut f, &group),
+            Err("Its machine is played elsewhere too, so it stays whole")
+        );
     }
 
     /// ADR 0124's E12-5d-2c: a state's pose made a machine gets its own Idle as its entry;

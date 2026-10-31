@@ -366,7 +366,9 @@ transitions["t1"].when = "speed > 0.1"
   machine. States show a node's pose; transitions go between a machine's states.
 - **A transition** goes when its condition holds (and, with an `exit` time, once the state
   it leaves has played that much), blending over `blend` seconds (0.25), by a cross-fade or
-  by inertialization. Without `from` it leaves any state of its machine.
+  by inertialization. Without `from` it leaves any state of its machine. A state that plays
+  a machine has played what the clip playing inside it has: an `exit` time out of it waits
+  for that clip.
   - **A cross-fade** plays both states while it blends.
   - **`inertialize = true`** plays only the state it goes to, from its first frame at full
     strength (half the sampling, and the most responsive), while each joint's difference

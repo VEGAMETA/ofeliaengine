@@ -1288,12 +1288,14 @@ impl AnimGraph {
     }
 
     /// Whether state `state` has played fraction `exit` of its pose (in its loop, for one
-    /// that loops); always without an exit time or for a machine's pose.
+    /// that loops); always without an exit time. A machine's pose has played what the state
+    /// it is in plays has (ADR 0124's E12-5d-2c-2, Unreal's automatic rule: an "at end"
+    /// transition out of a group of states waits for the end of the clip playing in it).
     fn exit_passed(&self, state: &StateDef, exit: f32, s: &GraphState) -> bool {
         if exit <= 0.0 {
             return true;
         }
-        let Some(timed) = self.timed_of(state.pose) else {
+        let Some(timed) = self.timed_now(state.pose, s) else {
             return true;
         };
         let t = usize::from(timed);
@@ -1303,6 +1305,20 @@ impl AnimGraph {
         }
         let exit = exit.fract();
         now - now.floor() >= exit || (before - exit).floor() < (now - exit).floor()
+    }
+
+    /// The clip or blend node `node` plays now: its own, or for a machine the one the state
+    /// it is in plays (down to [`DEPTH`] machines).
+    fn timed_now(&self, node: u16, s: &GraphState) -> Option<u16> {
+        let mut node = node;
+        for _ in 0..DEPTH {
+            let NodeDef::Machine { machine } = *self.nodes.get(usize::from(node))? else {
+                return self.timed_of(node);
+            };
+            let state = s.machines.get(usize::from(machine))?.state;
+            node = self.states.get(usize::from(state))?.pose;
+        }
+        None
     }
 
     /// The clip or blend a node plays at its own phase.
@@ -1330,7 +1346,7 @@ impl AnimGraph {
         let source_phase = self
             .states
             .get(usize::from(source))
-            .and_then(|st| self.timed_of(st.pose))
+            .and_then(|st| self.timed_now(st.pose, s))
             .map_or(0.0, |timed| s.phase[usize::from(timed)]);
         // The source as the tick before left it, kept once a tick before anything is
         // entered: a later transition of the tick may blend from it.
@@ -2774,6 +2790,38 @@ mod tests {
         );
         assert!(g.machine_now_of_node(&s, 1).is_none(), "a clip's node");
         assert!(g.machine_now_of_node(&s, 9).is_none(), "no such node");
+    }
+
+    /// ADR 0124's E12-5d-2c-2: an exit time on a transition out of a state playing a machine
+    /// is the exit time of the clip the state that machine is in plays (states grouped into a
+    /// machine keep their "at end" transitions), not passed at once as before.
+    #[test]
+    fn an_exit_time_out_of_a_machine_state_waits_for_the_clip_inside() {
+        let (skeleton, _clips, angles) = rig();
+        let mut desc = locomotion();
+        // Idle plays a machine (node 4) whose one state, Resting, plays Idle's clip.
+        desc.nodes.push(NodeDesc::Machine { entry: 3 });
+        desc.states[0].pose = 4;
+        desc.states.push(StateDesc {
+            name: "Resting".into(),
+            machine: 4,
+            pose: 1,
+        });
+        desc.transitions = vec![TransitionDesc {
+            from: Some(0),
+            to: 2,
+            exit: 0.5,
+            ..TransitionDesc::default()
+        }];
+        let (g, problems) = AnimGraph::cook(&desc, info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        let taken = (1..=200).find(|_| {
+            g.tick(&mut s, 1.0 / 64.0);
+            g.state_name(&s, 0) == Some("Jump")
+        });
+        // Idle's 1 s clip is half played at the 33rd tick's start.
+        assert_eq!(taken, Some(33), "taken at half the clip inside");
     }
 
     /// ADR 0124's E12-5c-2: a layer's machine put straight into a state by its name (a loaded
