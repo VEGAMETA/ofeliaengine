@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2c-2, grouping states** (#PR, ADR 0124's as-built; the team's а for the
+  - **E12-5d-2c-2, grouping states** (#495, ADR 0124's as-built; the team's а for the
     runtime): Ctrl+G puts the selected states into a machine played by a new state (the
     transitions in come into it, those out leave it, the same ones merged, the entry kept
     or the most entered; how many now come in elsewhere is said), Ctrl+Alt+G takes it apart,
@@ -1329,8 +1329,13 @@ Last updated: 2026-10-28.
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
     E12-5d-2d (the character previewed in the canvas's corner), the last of E12; 5a to 5c,
     5d-1, 5d-2a, 5d-2b, 5d-2c and 5e are done, and E12-4.
-    E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491); E13-1b, the editor's 2D
-    view, follows E12. No agents from now on (the owner, 2026-10-30).
+    E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491). No agents from now on
+    (the owner, 2026-10-30).
+    **The order after E12 (team decision 2026-10-31, а; "no hurry"):** what a game needs to
+    ship first: from E14 the one-button build, the input map and the navigation, physics and
+    lighting settings; then 5a, the layer for Claude Code; then E13's rest (the editor's 2D
+    view onwards) and E14's other parts. On the Pro plan from 2026-10-31: small features
+    batched, full gates for big changes only.
   - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а
     10а):** 2D entities in the one world (the XY plane); metres, 16 pixels a metre by
     default; tile cells in the scene by rows of 32-cell chunks through a palette; terrain
