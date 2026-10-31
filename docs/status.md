@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2d-2, the character in the graph's corner** (#PR, ADR 0124's as-built): outside
+  - **E12-5d-2d-2, the character in the graph's corner** (#497, ADR 0124's as-built): outside
     Play the canvas's corner shows the graph's preview model (else a character playing it)
     playing the tab's copy on its spot, turned by a drag, the canvas lit by it; each
     parameter has a preview row (not saved, no step; a trigger fires). **E12 is done.**
