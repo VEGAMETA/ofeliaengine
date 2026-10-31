@@ -113,6 +113,8 @@ pub(crate) struct ViewProj {
     pub(crate) forward: Vec3,
     /// 2 tan(fov / 2) / height: world units per pixel at a depth of 1.
     spread: f32,
+    /// A 2D view's world units per pixel, the same at every depth.
+    flat: Option<f32>,
 }
 
 impl ViewProj {
@@ -127,6 +129,7 @@ impl ViewProj {
             eye,
             forward: (camera.target - eye).normalize_or_zero(),
             spread: 2.0 * (camera.fov_y * 0.5).tan() / r[3].max(1.0),
+            flat: camera.flat.map(|height| height / r[3].max(1.0)),
         }
     }
 
@@ -155,6 +158,9 @@ impl ViewProj {
 
     /// World units a pixel spans at `p`'s depth.
     pub(crate) fn per_pixel(&self, p: Vec3) -> f32 {
+        if let Some(flat) = self.flat {
+            return flat;
+        }
         (p - self.eye).dot(self.forward).max(1e-4) * self.spread
     }
 
