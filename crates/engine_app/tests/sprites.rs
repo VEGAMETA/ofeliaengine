@@ -834,7 +834,8 @@ fn an_aseprite_files_tag_plays_its_frames() {
             user_text("event:step"),
         ],
     ));
-    w.frames.push((100, vec![cel(0, 0, 0, 16, 16, &solid([0, 0, 255, 255]))]));
+    w.frames
+        .push((100, vec![cel(0, 0, 0, 16, 16, &solid([0, 0, 255, 255]))]));
     let (dir, paths, ids) = project(
         "aseprite",
         &[("walker.aseprite", w.bytes(), SpriteImport::default())],
@@ -860,13 +861,18 @@ fn an_aseprite_files_tag_plays_its_frames() {
         *seen.entry((frame, at(&rgba, 0.5, 0.5))).or_insert(0) += 1;
     }
     let colours = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
-    for (&(frame, colour), _) in &seen {
+    for &(frame, colour) in seen.keys() {
         assert_eq!(colour, colours[frame as usize], "frame {frame}: {seen:?}");
     }
     let frames: std::collections::BTreeSet<u32> = seen.keys().map(|k| k.0).collect();
     assert_eq!(frames.len(), 3, "every frame shown: {seen:?}");
     // The green frame shows for 0.2 s, the others 0.1 s: about twice as often.
-    let count = |f: u32| seen.iter().filter(|(k, _)| k.0 == f).map(|(_, n)| n).sum::<u32>();
+    let count = |f: u32| {
+        seen.iter()
+            .filter(|(k, _)| k.0 == f)
+            .map(|(_, n)| n)
+            .sum::<u32>()
+    };
     assert!(count(1) > count(0) && count(1) > count(2), "{seen:?}");
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
