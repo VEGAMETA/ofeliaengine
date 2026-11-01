@@ -983,3 +983,26 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c-7 and later):** a clip's frames changed in the tab, nine-slice borders
   (with the sliced mode); graphs of sprite clips; Aseprite files; sliced and tiled modes;
   renames followed in scenes not open.
+
+## As built (E13-2d, 2026-11-01): sliced and tiled sprites
+
+- **Drawn in pieces on the CPU** (`sprites::pieces`), no shader change: the sprite's quad
+  (placed, culled and sorted as before) goes to the canvas as it is when simple; as nine
+  pieces when sliced (`Sprite::SLICED` with a border): the frame's border
+  (`SpriteImage::border`, from its slice) kept at its pixels' size, the corners shrunk
+  together when the sprite is smaller than its border, the edges stretched one way and
+  the middle both, a flip swapping its sides; as a grid when tiled (`Sprite::TILED`): the
+  frame at its own size from the bottom left, the last row and column cut (their texture
+  coordinates cut with them), at most 4,096 pieces (the tiles grow beyond). A sort
+  group's sprite gives its pieces in order. Nothing is allocated.
+- **The editor:** **Image: Slice Border…** (0 to 16 pixels each side, kept within half
+  the slice) for the picked slices, one undo step; the picked slice's border shown as
+  fainter lines inside it.
+- Picking and masks see the whole quad (a tiled sprite's mask test samples it
+  stretched: noted, rare).
+- Tests: nine pieces (a corner's size, place and pixels, the middle stretched), three
+  tiles with the last cut, one piece when simple; on both GPUs' test a 3 × 1 m panel
+  keeping its 4-pixel border sliced and stretching it simple; the editor setting a border
+  kept within a small slice's half.
+- **Left (E13-2e and later):** graphs of sprite clips; Aseprite files; a clip's frames
+  changed in the tab; renames followed in scenes not open.

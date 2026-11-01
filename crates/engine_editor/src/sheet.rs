@@ -398,6 +398,19 @@ pub(crate) fn draw(
         for (p, q) in [(a, b), (b, c), (c, d), (d, a)] {
             line(canvas, p, q, color);
         }
+        // Its nine-slice border (E13-2d), a fainter line inside.
+        if picked && s.border.iter().any(|&b| b > 0) {
+            let [l, t, r, b] = s.border.map(|v| v as f32);
+            let faint = Vec4::new(color.x, color.y, color.z, 0.5);
+            for (p, q) in [
+                ([x + l, y], [x + l, y + h]),
+                ([x + w - r, y], [x + w - r, y + h]),
+                ([x, y + t], [x + w, y + t]),
+                ([x, y + h - b], [x + w, y + h - b]),
+            ] {
+                line(canvas, to(p), to(q), faint);
+            }
+        }
         if picked {
             // Its pivot: a small cross.
             let pivot = to([x + w * s.pivot[0], y + h * (1.0 - s.pivot[1])]);

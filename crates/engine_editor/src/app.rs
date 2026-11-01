@@ -1266,6 +1266,7 @@ struct CommandIds {
     slice_islands: CommandId,
     slice_pivot: CommandId,
     clip_time: CommandId,
+    slice_border: CommandId,
     clip_mode: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
@@ -1527,6 +1528,7 @@ fn commands() -> (Commands, CommandIds) {
         slice_islands: c.register("image.slice_islands", "Image", "Slice by Islands"),
         slice_pivot: c.register("image.slice_pivot", "Image", "Slice Pivot…"),
         clip_time: c.register("image.clip_time", "Image", "Clip Frame Time…"),
+        slice_border: c.register("image.slice_border", "Image", "Slice Border…"),
         clip_mode: c.register("image.clip_mode", "Image", "Clip Mode…"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
@@ -2573,6 +2575,8 @@ enum Pick {
     SlicePivot(usize),
     /// Sets the chosen clip's frame time, in milliseconds (E13-2c-6).
     ClipTime(u32),
+    /// Sets the picked slices' nine-slice border, this many pixels each side (E13-2d).
+    SliceBorder(u32),
     /// Sets the chosen clip's mode (E13-2c-6).
     ClipMode(engine_scene::SpriteClipMode),
     /// Keeps a change made while playing, or not (E3-3).
@@ -9802,6 +9806,7 @@ impl Editor {
                             Pick::Step(k, value) => self.set_step(world, k, value),
                             Pick::SliceGrid(cell) => self.slice_image(world, Some(cell)),
                             Pick::SlicePivot(k) => self.set_slice_pivot(world, k),
+                            Pick::SliceBorder(px) => self.set_slice_border(world, px),
                             Pick::ClipTime(ms) => self.set_clip(world, "Clip Frame Time", |c| {
                                 c.frame_time = ms as f32 / 1000.0;
                                 c.durations.clear();
@@ -15029,6 +15034,54 @@ impl Editor {
         }
     }
 
+    /// "Image: Slice Border…" (E13-2d): border widths in the palette, for the picked slices
+    /// of the image tab shown (what a sprite in the sliced mode keeps unstretched).
+    fn pick_slice_border(&mut self, world: &mut World) {
+        let picked = self
+            .active_sheet
+            .and_then(|k| self.sheets.get(k))
+            .is_some_and(|d| !d.picked.is_empty());
+        if !picked {
+            self.say(String::from(
+                "Pick slices in an image's tab to set their border",
+            ));
+            return;
+        }
+        let items = [0u32, 1, 2, 3, 4, 6, 8, 12, 16]
+            .into_iter()
+            .map(|px| Choice {
+                label: if px == 0 {
+                    String::from("None (stretched whole)")
+                } else {
+                    format!("{px} px each side")
+                },
+                detail: String::new(),
+                pick: Pick::SliceBorder(px),
+            })
+            .collect();
+        self.open_list(world, "The slices' nine-slice border", items);
+    }
+
+    /// The picked slices of the image tab shown get a border of `px` pixels each side
+    /// (kept within half their size), one undo step.
+    fn set_slice_border(&mut self, world: &mut World, px: u32) {
+        let Some(doc) = self.active_sheet.and_then(|s| self.sheets.get(s)) else {
+            return;
+        };
+        let picked = doc.picked.clone();
+        let (id, path) = (doc.id, doc.path.clone());
+        self.edit_image_meta(world, id, &path, "Slice Border", |meta| {
+            for &s in &picked {
+                if let Some(slice) = meta.sprite.slices.get_mut(s) {
+                    let [_, _, w, h] = slice.rect;
+                    let (bx, by) = (px.min(w / 2), px.min(h / 2));
+                    slice.border = [bx, by, bx, by];
+                }
+            }
+        });
+        self.say(format!("{} slices: border {px} px", picked.len()));
+    }
+
     /// "Image: Slice Pivot…" (E13-2c-3): the presets in the palette, for the picked slices
     /// of the image tab shown.
     fn pick_slice_pivot(&mut self, world: &mut World) {
@@ -20131,6 +20184,8 @@ impl Editor {
             self.slice_image(world, None);
         } else if id == ids.slice_pivot {
             self.pick_slice_pivot(world);
+        } else if id == ids.slice_border {
+            self.pick_slice_border(world);
         } else if id == ids.clip_time || id == ids.clip_mode {
             self.pick_clip_setting(world, id == ids.clip_time);
         } else if id == ids.actual_size {
@@ -35344,8 +35399,14 @@ mod tests {
             .unwrap();
         ed.set_slice_pivot(&mut world, feet);
         assert!(slices(&dir).iter().all(|s| s.pivot == [0.5, 0.0]));
-        assert_eq!(ed.history.steps().count(), 3);
+        // A border of 3 pixels, kept within half of each (coin_1 is 5 × 4: 2 across).
+        ed.set_slice_border(&mut world, 3);
+        let borders: Vec<[u32; 4]> = slices(&dir).iter().map(|s| s.border).collect();
+        assert_eq!(borders, [[3, 3, 3, 3], [2, 2, 2, 2]]);
         let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        // The border undone; the pivot preset next.
+        assert_eq!(ed.history.steps().count(), 3);
         ed.run(&mut world, undo);
         assert!(slices(&dir).iter().all(|s| s.pivot == [0.5, 0.5]));
         let _ = std::fs::remove_dir_all(&dir);

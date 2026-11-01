@@ -350,6 +350,60 @@ fn an_animator_plays_a_sheets_clip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A sliced sprite (ADR 0125's E13-2d) keeps its border's pixels at their size when
+/// stretched; a simple one stretches them with the rest.
+#[test]
+fn a_sliced_sprite_keeps_its_border_when_stretched() {
+    // 16 × 16: a 4-pixel red border around a green middle.
+    let panel = image(16, 16, |x, y| {
+        if x < 4 || y < 4 || x >= 12 || y >= 12 {
+            [255, 0, 0, 255]
+        } else {
+            [0, 255, 0, 255]
+        }
+    });
+    let import = SpriteImport {
+        slices: vec![SliceImport {
+            name: String::from("panel"),
+            rect: [0, 0, 16, 16],
+            border: [4, 4, 4, 4],
+            ..SliceImport::default()
+        }],
+        ..SpriteImport::default()
+    };
+    let (dir, paths, ids) = project("sliced", &[("panel.png", panel, import)]);
+    let Some(mut player) = player(&dir, &paths) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let world = player.world_mut();
+    camera(world);
+    // Both 3 × 1 metres: the sliced one at y 1, the simple one at y -1.
+    let base = Sprite::new(AssetRef::file(ids[0])).with_size(Vec2::new(3.0, 1.0));
+    for (y, mode) in [(1.0, Sprite::SLICED), (-1.0, Sprite::SIMPLE)] {
+        world.spawn((
+            Transform::from_xyz(0.0, y, 0.0),
+            GlobalTransform::IDENTITY,
+            Sprite { mode, ..base },
+        ));
+    }
+    let mut game = Slides(None);
+    let rgba = capture_with(&mut player, &mut game, 2);
+    let (red, green) = ([255, 0, 0, 255], [0, 255, 0, 255]);
+    // Half a metre in from the left edge (x -1.5): inside the sliced one's middle, still
+    // in the simple one's stretched border (0.75 metres wide).
+    assert_eq!(
+        at(&rgba, -1.0, 1.0),
+        green,
+        "sliced: past its 0.25 m border"
+    );
+    assert_eq!(at(&rgba, -1.4, 1.0), red, "sliced: its border");
+    assert_eq!(at(&rgba, -1.0, -1.0), red, "simple: the border stretched");
+    assert_eq!(at(&rgba, 0.0, 1.0), green);
+    assert_valid(&player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Layers, then order within a layer; y in a layer that sorts by y; a sort group's parts
 /// together at the group's place.
 #[test]
