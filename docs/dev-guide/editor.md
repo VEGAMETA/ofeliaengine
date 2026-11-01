@@ -1806,7 +1806,8 @@ let go, on a whole pixel of the art. In 2D, moves snap by the art's pixels (Shif
 one, Ctrl lands on one), and from 800 % a faint grid shows every pixel. An amber frame
 shows what the scene's game camera sees. Click a sprite to select it: the one drawn on top
 where you click. A click on a clear part of an image (under about 10 % opaque) goes
-through to what is behind it.
+through to what is behind it. Selected sprites are outlined in orange (the active one
+lighter), as selected models are in 3D.
 
 ## Building the game
 

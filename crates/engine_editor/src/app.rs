@@ -4027,6 +4027,11 @@ struct Editor {
     /// The game camera's frame in the 2D view (E13-1b): what the scene's main orthographic
     /// camera shows; empty in 3D or without one.
     camera_frame: Vec<[Vec3; 2]>,
+    /// The 2D view's outlines of the selected sprites (E13-1b-7): the selection's, the
+    /// active one's.
+    sprite_outline: [Vec<[Vec3; 2]>; 2],
+    /// The entities [`Self::sprite_outline`] walks, kept between frames.
+    sprite_stack: Vec<Entity>,
     cameras_q: Option<QueryState<(Entity, &'static Camera, &'static GlobalTransform)>>,
     nav_key: BlockoutKey,
     nav_job: Option<std::sync::mpsc::Receiver<Result<NavBaked, String>>>,
@@ -4984,6 +4989,8 @@ impl Editor {
             nav_lines: Default::default(),
             pixel_grid: Vec::new(),
             camera_frame: Vec::new(),
+            sprite_outline: Default::default(),
+            sprite_stack: Vec::new(),
             cameras_q: None,
             nav_key: Vec::new(),
             nav_job: None,
@@ -7727,6 +7734,11 @@ impl Editor {
             add_menu: self.add_open.then_some((&add_items[..], self.add_group)),
             add_at: self.add_at,
             view_mode: self.view_mode.label(),
+            projection: if self.orbit.flat.is_some() {
+                "2D"
+            } else {
+                "Perspective"
+            },
             view_modes: self.view_menu_open.then_some(view_mode_items.as_slice()),
             reveal_row,
             drop_row,
@@ -12710,6 +12722,40 @@ impl Editor {
         ];
         self.camera_frame
             .extend_from_slice(&[[a, b], [b, c], [c, d], [d, a]]);
+    }
+
+    /// The selected sprites' outlines in the 2D view (ADR 0125's E13-1b-7), as the 3D
+    /// outline draws the selection: the active one lighter, children's sprites with their
+    /// parents'. Kept in their vectors, so a frame allocates nothing once they have grown.
+    fn sprite_outlines(&mut self, player: &mut Player) {
+        for lines in &mut self.sprite_outline {
+            lines.clear();
+        }
+        if self.orbit.flat.is_none() || self.game_view() {
+            return;
+        }
+        let active = self.active();
+        let z = self.orbit.target.z;
+        let mut stack = core::mem::take(&mut self.sprite_stack);
+        for k in 0..self.selection.len() {
+            let e = self.selection[k];
+            let lines = &mut self.sprite_outline[usize::from(Some(e) == active)];
+            stack.clear();
+            stack.push(e);
+            while let Some(x) = stack.pop() {
+                if let Some(c) = player.sprite_corners(x) {
+                    let at = |k: usize| c[k].extend(z);
+                    lines.extend_from_slice(&[
+                        [at(0), at(1)],
+                        [at(1), at(2)],
+                        [at(2), at(3)],
+                        [at(3), at(0)],
+                    ]);
+                }
+                stack.extend(player.runtime().world.children(x));
+            }
+        }
+        self.sprite_stack = stack;
     }
 
     /// The 2D view's pixel grid (ADR 0125's E13-1b): from 800 % (8 screen pixels an art
@@ -27353,6 +27399,9 @@ impl Editor {
         }
         if let Some(doc) = &doc {
             self.apply_view(world, &doc.view);
+        } else {
+            // A scene opened for the first time: 2D or 3D by its camera all the same.
+            self.view_as_seen(world);
         }
         // The session's other tabs: their unsaved changes from their autosaves, else their
         // files; those gone from the disk with nothing unsaved are left out.
@@ -27471,9 +27520,9 @@ impl Editor {
 
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
     /// left out), the tree's closed rows, the filters, the tool.
-    fn apply_view(&mut self, world: &mut World, view: &View) {
-        // A scene seen through an orthographic camera opens in the 2D view (ADR 0125's
-        // E13-1b), a perspective one's in 3D.
+    /// A scene seen through an orthographic camera opens in the 2D view (ADR 0125's
+    /// E13-1b), a perspective one's in 3D: by its main camera, the editor's own left out.
+    fn view_as_seen(&mut self, world: &mut World) {
         let editor = self.camera;
         let mut cameras = QueryState::<(Entity, &Camera)>::new(world);
         let flat = cameras
@@ -27486,6 +27535,10 @@ impl Editor {
         {
             self.run(world, self.ids.view_2d);
         }
+    }
+
+    fn apply_view(&mut self, world: &mut World, view: &View) {
+        self.view_as_seen(world);
         if let Some(([x, y, z], yaw, pitch, distance)) = view.camera {
             self.orbit.target = Vec3::new(x, y, z);
             self.orbit.yaw = yaw;
@@ -29501,6 +29554,9 @@ impl<G> EditorGame<G> {
             let hit = player.sprite_at(point, |image, uv| masks.opaque(db, image.file, uv));
             ed.picked_sprite = hit.map(|e| (request, e));
         }
+        // The selected sprites' outlines in 2D (E13-1b-7): the pick pass's outline sees
+        // only 3D instances.
+        shared.sprite_outlines(player);
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
@@ -29639,6 +29695,16 @@ impl<G> EditorGame<G> {
     /// The selected entities, in the order they were picked (the active one last).
     pub fn selection(&self) -> Vec<Entity> {
         self.shared.borrow().selection.clone()
+    }
+
+    /// The 2D view's outline lines of the selected sprites this frame (ADR 0125's E13-1b-7),
+    /// the selection's and the active one's. For tests and tools.
+    pub fn sprite_outline_lines(&self) -> [usize; 2] {
+        let shared = self.shared.borrow();
+        [
+            shared.sprite_outline[0].len(),
+            shared.sprite_outline[1].len(),
+        ]
     }
 
     /// The viewport's icons this frame (ADR 0107 E2-7): each light's and camera's entity and
@@ -32659,6 +32725,17 @@ impl Overlay for EditorOverlay {
                         LineBatch {
                             lines: &editor.camera_frame,
                             color: [1.0, 0.85, 0.3, 0.9],
+                            hidden: 1.0,
+                        },
+                        // The selected sprites' outlines (E13-1b-7), the outline's colors.
+                        LineBatch {
+                            lines: &editor.sprite_outline[0],
+                            color: OutlineStyle::default().colors[0],
+                            hidden: 1.0,
+                        },
+                        LineBatch {
+                            lines: &editor.sprite_outline[1],
+                            color: OutlineStyle::default().colors[1],
                             hidden: 1.0,
                         },
                     ];

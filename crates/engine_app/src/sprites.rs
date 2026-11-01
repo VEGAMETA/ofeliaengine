@@ -374,9 +374,11 @@ impl Sprites {
 
     /// The sprite under `point` (on the XY plane) for which `opaque` says its image is
     /// there (given the image and the texture coordinates `point` falls on, 0 to 1 from
-    /// the image's top left), the one drawn over the others there (the highest layer, then the layer's order or y-sorting, then the later entity; sort
-    /// groups are not looked at): the editor's
-    /// 2D picking (ADR 0125's E13-1b). Sprites whose image is not made yet are passed over.
+    /// the image's top left), the one drawn over the others there: the editor's 2D picking
+    /// (ADR 0125's E13-1b). Drawn over means as [`Self::record`] sorts: the higher layer,
+    /// then the layer's order or y; a sort group's sprites at their group's place, after
+    /// the ungrouped ones of the same place, by their order within it. Sprites whose image
+    /// is not made yet are passed over.
     pub(crate) fn sprite_at(
         &mut self,
         world: &World,
@@ -384,7 +386,7 @@ impl Sprites {
         point: Vec2,
         opaque: &mut dyn FnMut(AssetRef, Vec2) -> bool,
     ) -> Option<Entity> {
-        let mut best: Option<((i16, f32, u32), Entity)> = None;
+        let mut best: Option<(PickKey, Entity)> = None;
         let Self { drawn, sorting, .. } = self;
         drawn.for_each_readonly(world, |(e, sprite, global)| {
             if sprite.hidden != 0 || sprite.image.is_none() {
@@ -398,16 +400,47 @@ impl Sprites {
             let Some(uv) = covers(sprite, &image, &pose, point) else {
                 return;
             };
-            let o = order(sorting, sprite.layer, sprite.order, pose[5]);
-            let key = (o.layer, o.key, e.index());
-            let over = |k: (i16, f32, u32)| {
-                (key.0, key.1.total_cmp(&k.1), key.2) > (k.0, core::cmp::Ordering::Equal, k.2)
+            let key = match sort_group_of(world, e) {
+                Some((group, place, at)) => PickKey {
+                    place: order(sorting, place.layer, place.order, at),
+                    rest: (1, group.index(), sprite.order, e.index()),
+                },
+                None => PickKey {
+                    place: order(sorting, sprite.layer, sprite.order, pose[5]),
+                    rest: (0, 0, 0, e.index()),
+                },
             };
-            if best.is_none_or(|(k, _)| over(k)) && opaque(sprite.image, uv) {
+            if best.as_ref().is_none_or(|(k, _)| key.over(k)) && opaque(sprite.image, uv) {
                 best = Some((key, e));
             }
         });
         best.map(|(_, e)| e)
+    }
+
+    /// Entity `e`'s sprite's four corners on the XY plane (counter-clockwise from its
+    /// bottom left), where the last frame drew it: the editor's outline of a selected
+    /// sprite (ADR 0125's E13-1b). `None` without a sprite, or before its image is made.
+    pub(crate) fn sprite_corners(
+        &mut self,
+        world: &World,
+        assets: &mut Assets,
+        e: Entity,
+    ) -> Option<[Vec2; 4]> {
+        let sprite = world.get::<Sprite>(e)?;
+        let global = world.get::<GlobalTransform>(e)?;
+        if sprite.image.is_none() {
+            return None;
+        }
+        let slot = assets.sprite_slot(sprite.image);
+        let image = assets.sprite_image(slot)?;
+        let (center, ax, ay) = placed(sprite, &image, &pose_of(&global.0));
+        let (hx, hy) = (ax * 0.5, ay * 0.5);
+        Some([
+            center - hx - hy,
+            center + hx - hy,
+            center + hx + hy,
+            center - hx + hy,
+        ])
     }
 
     /// Sorts by `sorting` from the next frame on.
@@ -601,27 +634,8 @@ fn order(sorting: &YSorted, layer: i16, order: i16, y: f32) -> Order {
 /// `image` covers at `pose`: its texture coordinates (0 to 1, the image's top at v 0,
 /// flips applied), as the 2D pass samples there (ADR 0125's E13-1b: the editor's picking).
 fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> Option<Vec2> {
-    let own = image.size / image.pixels_per_unit;
-    let size = Vec2::new(
-        if sprite.size.x == 0.0 {
-            own.x
-        } else {
-            sprite.size.x
-        },
-        if sprite.size.y == 0.0 {
-            own.y
-        } else {
-            sprite.size.y
-        },
-    );
-    let offset = (Vec2::splat(0.5) - image.pivot) * size;
-    let (x, y, at) = (
-        Vec2::new(pose[0], pose[1]),
-        Vec2::new(pose[2], pose[3]),
-        Vec2::new(pose[4], pose[5]),
-    );
-    let (ax, ay) = (x * size.x, y * size.y);
-    let d = point - (at + x * offset.x + y * offset.y);
+    let (center, ax, ay) = placed(sprite, image, pose);
+    let d = point - center;
     let det = ax.x * ay.y - ax.y * ay.x;
     if det.abs() < 1e-12 {
         return None;
@@ -638,9 +652,9 @@ fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> Opt
     ))
 }
 
-/// `sprite`'s quad at `pose` (its order still to set), or `None` when wholly outside
-/// `view`.
-fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect>) -> Option<Quad> {
+/// Where `sprite` of `image` lies at `pose`: its centre and its two sides (the image's
+/// width along the first, its height along the second), as [`quad`] draws it.
+fn placed(sprite: &Sprite, image: &SpriteImage, pose: &Pose) -> (Vec2, Vec2, Vec2) {
     let own = image.size / image.pixels_per_unit;
     let size = Vec2::new(
         if sprite.size.x == 0.0 {
@@ -661,8 +675,48 @@ fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect
         Vec2::new(pose[2], pose[3]),
         Vec2::new(pose[4], pose[5]),
     );
-    let (axis_x, axis_y) = (x * size.x, y * size.y);
-    let center = at + x * offset.x + y * offset.y;
+    (at + x * offset.x + y * offset.y, x * size.x, y * size.y)
+}
+
+/// Where a sprite sorts for picking: its place (its own, or its sort group's) and, for
+/// equal places, ungrouped before grouped, then the group, its order there, the entity.
+struct PickKey {
+    place: Order,
+    rest: (u8, u32, i16, u32),
+}
+
+impl PickKey {
+    /// Whether this one is drawn over `other`.
+    fn over(&self, other: &Self) -> bool {
+        let by_place = self
+            .place
+            .layer
+            .cmp(&other.place.layer)
+            .then(self.place.key.total_cmp(&other.place.key));
+        by_place.then(self.rest.cmp(&other.rest)).is_gt()
+    }
+}
+
+/// The sort group entity `e`'s sprite is drawn with: its nearest ancestor with a
+/// [`SortGroup`], that group's place and its y.
+fn sort_group_of(world: &World, e: Entity) -> Option<(Entity, SortGroup, f32)> {
+    let mut at = world.parent(e);
+    while let Some(p) = at {
+        if let Some(group) = world.get::<SortGroup>(p) {
+            let y = world
+                .get::<GlobalTransform>(p)
+                .map_or(0.0, |g| g.0.translation.y);
+            return Some((p, *group, y));
+        }
+        at = world.parent(p);
+    }
+    None
+}
+
+/// `sprite`'s quad at `pose` (its order still to set), or `None` when wholly outside
+/// `view`.
+fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect>) -> Option<Quad> {
+    let (center, axis_x, axis_y) = placed(sprite, image, pose);
     if let Some(view) = view {
         let reach = (axis_x.abs() + axis_y.abs()) * 0.5;
         if (center + reach).cmplt(view.min).any() || (center - reach).cmpgt(view.max).any() {
