@@ -10783,6 +10783,12 @@ impl Editor {
             return;
         };
         let file = self.root.join(&path);
+        if engine_assets::aseprite::is_aseprite_path(&file) {
+            self.say(format!(
+                "{path}: an Aseprite file's frames are its slices; change them in Aseprite"
+            ));
+            return;
+        }
         let image = match std::fs::read(&file)
             .map_err(|e| e.to_string())
             .and_then(|b| engine_assets::decode_image(&b).map_err(|e| e.to_string()))
@@ -10843,8 +10849,9 @@ impl Editor {
     /// Image `id`'s `.meta` was written as `meta`: the inspector shows it, the player makes
     /// the image's sprites again.
     fn image_meta_written(&mut self, id: AssetId, meta: &AssetMeta) {
+        // Read again: an Aseprite file's tab shows the file's own merged in (E13-2f).
         for doc in self.sheets.iter_mut().filter(|d| d.id == id) {
-            doc.set_meta(meta);
+            doc.read_meta(&self.root);
         }
         if let Some(asset) = self.inspected.as_mut().filter(|a| a.id == id) {
             asset.meta = meta.clone();
@@ -14877,6 +14884,12 @@ impl Editor {
         }
         let (id, path) = (doc.id, doc.path.clone());
         let file = self.root.join(&path);
+        if engine_assets::aseprite::is_aseprite_path(&file) {
+            self.say(format!(
+                "{path}: an Aseprite file names its own frames and slices; rename them in Aseprite"
+            ));
+            return;
+        }
         let mut meta = AssetMeta::read(&file);
         let before = meta.to_text(id);
         let Some(slice) = meta.sprite.slices.get_mut(k) else {
@@ -15194,7 +15207,36 @@ impl Editor {
         let file = self.root.join(path);
         let mut meta = AssetMeta::read(&file);
         let before = meta.to_text(id);
-        edit(&mut meta);
+        if engine_assets::aseprite::is_aseprite_path(&file) {
+            // An Aseprite file (E13-2f): the edit sees its frames, tags and slices as the
+            // tab shows them; the `.meta` keeps only what differs from the file's.
+            use engine_assets::aseprite::{overrides, sprite_settings};
+            let Ok(merged) = sprite_settings(&file, &meta.sprite) else {
+                self.say(format!("{path}: not read as an Aseprite file"));
+                return;
+            };
+            meta.sprite = merged;
+            edit(&mut meta);
+            let edited = meta.sprite.clone();
+            let own = engine_scene::SpriteImport {
+                slices: Vec::new(),
+                clips: Vec::new(),
+                ..edited.clone()
+            };
+            let Ok(base) = sprite_settings(&file, &own) else {
+                return;
+            };
+            (meta.sprite.slices, meta.sprite.clips) = overrides(&base, &edited);
+            if sprite_settings(&file, &meta.sprite).ok() != Some(edited) {
+                self.say(format!(
+                    "{path}: an Aseprite file's frames, tags and their times are its own; \
+                     change them in Aseprite"
+                ));
+                return;
+            }
+        } else {
+            edit(&mut meta);
+        }
         let after = meta.to_text(id);
         if after == before {
             return;
@@ -35409,6 +35451,67 @@ mod tests {
         assert_eq!(ed.history.steps().count(), 3);
         ed.run(&mut world, undo);
         assert!(slices(&dir).iter().all(|s| s.pivot == [0.5, 0.5]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An Aseprite file's tab (ADR 0125's E13-2f): its frames are slices and its tag a
+    /// clip, read from the file; a pivot set there is kept in the `.meta` by name, alone;
+    /// what only the file says (a frame's name, its cells) is not the editor's to change.
+    #[test]
+    fn an_aseprite_files_tab_shows_its_frames_and_keeps_what_the_editor_adds() {
+        use engine_assets::aseprite::sample::{Writer, cel, layer, tags};
+        let (dir, mut world, mut ed, _) = drop_project("aseprite-tab");
+        let mut w = Writer::new(8, 8, 32);
+        w.frames.push((
+            100,
+            vec![
+                layer(1, 0, 0, 0, 255, "a"),
+                cel(0, 0, 0, 8, 8, &[200u8; 256]),
+                tags(&[(0, 1, 0, 0, "walk")]),
+            ],
+        ));
+        w.frames
+            .push((100, vec![cel(0, 0, 0, 8, 8, &[100u8; 256])]));
+        let file = dir.join("props/walker.aseprite");
+        std::fs::write(&file, w.bytes()).unwrap();
+        ed.open_assets();
+        let id = ed.asset_db.find("props/walker.aseprite").expect("found").id;
+        ed.open_sheet(id, "props/walker.aseprite");
+        let names: Vec<&str> = ed.sheets[0]
+            .slices
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["frame_0", "frame_1"]);
+        assert_eq!(ed.sheets[0].slices[1].rect, [8, 0, 8, 8]);
+        assert_eq!(ed.sheets[0].clip_list[0].name, "walk");
+        // Frame 1 stands on its feet: the .meta keeps that alone.
+        ed.sheets[0].click(Some(1), false, false);
+        let feet = crate::sheet::PIVOTS
+            .iter()
+            .position(|(_, p)| *p == [0.5, 0.0])
+            .unwrap();
+        ed.set_slice_pivot(&mut world, feet);
+        let meta = AssetMeta::read(&file).sprite;
+        let kept: Vec<(&str, [f32; 2])> = meta
+            .slices
+            .iter()
+            .map(|s| (s.name.as_str(), s.pivot))
+            .collect();
+        assert_eq!(kept, [("frame_1", [0.5, 0.0])]);
+        assert!(meta.clips.is_empty());
+        assert_eq!(ed.sheets[0].slices[1].pivot, [0.5, 0.0]);
+        assert_eq!(ed.sheets[0].slices.len(), 2);
+        // The file's own: a frame's name, its tag's frame time, slicing by a grid.
+        ed.rename_slice(&mut world, "run");
+        ed.sheets[0].clip = Some((0, Instant::now()));
+        ed.set_clip(&mut world, "Clip Frame Time", |c| c.frame_time = 0.5);
+        ed.reveal_asset(id);
+        ed.slice_image(&mut world, Some(4));
+        assert_eq!(ed.history.steps().count(), 1, "only the pivot");
+        assert_eq!(ed.sheets[0].slices[1].name, "frame_1");
+        assert_eq!(ed.sheets[0].clip_list[0].frame_time, 0.1);
+        assert_eq!(AssetMeta::read(&file).sprite, meta);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

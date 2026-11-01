@@ -809,3 +809,71 @@ fn sprites_are_kept_in_scenes_and_saves() {
         (vec![sprite], vec![group], vec![camera])
     );
 }
+
+/// An Aseprite file (ADR 0125's E13-2f) drawn as a sprite: its frames are its slices, its
+/// tag a clip with the frames' own durations, a cel's `event:` line an event of the clip,
+/// and the drawn sprite shows the frame's merged layers.
+#[test]
+fn an_aseprite_files_tag_plays_its_frames() {
+    use engine_assets::aseprite::sample::{Writer, cel, layer, tags, user_text};
+    // 16 × 16, three frames: red, green, blue; the green one shown twice as long.
+    let mut w = Writer::new(16, 16, 32);
+    let solid = |c: [u8; 4]| c.repeat(16 * 16);
+    w.frames.push((
+        100,
+        vec![
+            layer(1, 0, 0, 0, 255, "paint"),
+            cel(0, 0, 0, 16, 16, &solid([255, 0, 0, 255])),
+            tags(&[(0, 2, 0, 0, "walk")]),
+        ],
+    ));
+    w.frames.push((
+        200,
+        vec![
+            cel(0, 0, 0, 16, 16, &solid([0, 255, 0, 255])),
+            user_text("event:step"),
+        ],
+    ));
+    w.frames
+        .push((100, vec![cel(0, 0, 0, 16, 16, &solid([0, 0, 255, 255]))]));
+    let (dir, paths, ids) = project(
+        "aseprite",
+        &[("walker.aseprite", w.bytes(), SpriteImport::default())],
+    );
+    let Some(mut player) = player(&dir, &paths) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let world = player.world_mut();
+    camera(world);
+    let walker = world.spawn((
+        Transform::from_xyz(0.5, 0.5, 0.0),
+        GlobalTransform::IDENTITY,
+        Sprite::new(AssetRef::file(ids[0])),
+        Animator::new("walk"),
+    ));
+    let mut game = Slides(None);
+    // Each frame's colour at the sprite's middle against its frame number, over a loop.
+    let mut seen = BTreeMap::new();
+    for _ in 0..30 {
+        let rgba = capture_with(&mut player, &mut game, 1);
+        let frame = player.world_mut().get::<Sprite>(walker).unwrap().frame;
+        *seen.entry((frame, at(&rgba, 0.5, 0.5))).or_insert(0) += 1;
+    }
+    let colours = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+    for &(frame, colour) in seen.keys() {
+        assert_eq!(colour, colours[frame as usize], "frame {frame}: {seen:?}");
+    }
+    let frames: std::collections::BTreeSet<u32> = seen.keys().map(|k| k.0).collect();
+    assert_eq!(frames.len(), 3, "every frame shown: {seen:?}");
+    // The green frame shows for 0.2 s, the others 0.1 s: about twice as often.
+    let count = |f: u32| {
+        seen.iter()
+            .filter(|(k, _)| k.0 == f)
+            .map(|(_, n)| n)
+            .sum::<u32>()
+    };
+    assert!(count(1) > count(0) && count(1) > count(2), "{seen:?}");
+    assert_valid(&player);
+    let _ = std::fs::remove_dir_all(&dir);
+}

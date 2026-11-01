@@ -69,7 +69,7 @@ pub struct TextureImage {
 /// Why an image could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageError {
-    /// Neither PNG nor JPEG.
+    /// Neither PNG, JPEG nor Aseprite.
     UnknownFormat,
     /// The decoder failed.
     Decode(String),
@@ -78,7 +78,7 @@ pub enum ImageError {
 impl core::fmt::Display for ImageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::UnknownFormat => write!(f, "not a PNG or JPEG image"),
+            Self::UnknownFormat => write!(f, "not a PNG, JPEG or Aseprite image"),
             Self::Decode(e) => write!(f, "image decoding failed: {e}"),
         }
     }
@@ -86,13 +86,16 @@ impl core::fmt::Display for ImageError {
 
 impl std::error::Error for ImageError {}
 
-/// Decodes a PNG or JPEG (recognized by their signatures) to RGBA8.
+/// Decodes a PNG, a JPEG or an Aseprite file (recognized by their signatures) to RGBA8; an
+/// Aseprite file's frames come as a sheet ([`crate::aseprite::Aseprite::sheet`]).
 pub fn decode_image(bytes: &[u8]) -> Result<Image, ImageError> {
     engine_profiler::zone!("assets::decode_image");
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         decode_png(bytes)
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         decode_jpeg(bytes)
+    } else if crate::aseprite::is_aseprite(bytes) {
+        crate::aseprite::Aseprite::read(bytes)?.sheet()
     } else {
         Err(ImageError::UnknownFormat)
     }
