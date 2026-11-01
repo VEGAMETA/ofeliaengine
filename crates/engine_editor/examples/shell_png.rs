@@ -504,6 +504,7 @@ fn main() {
         add_component: true,
         add_at: None,
         view_mode: "Lit",
+        projection: "Perspective",
         view_modes: None,
         path: "res://levels",
         folders: &folders,

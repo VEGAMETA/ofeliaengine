@@ -806,6 +806,15 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   an image it cannot decode is picked by its rectangle. The game keeps no image on the
   CPU. Tests: the mask's threshold and clamping; masks from files, refreshed on change; a
   clear pixel picks what is under it (both GPUs' sorting test).
-- **Left (E13-1b-7 and later):** sort groups in picking; the selected sprite's outline;
-  Ctrl snapping to a tile map's cells (with E13-3); the 2D gizmo's own look. A slice
-  (E13-2) will pass its rectangle of the image to the same test.
+- **E13-1b-7:** **the selected sprites outlined** in the 2D view in the 3D outline's
+  colors (the active one lighter), children's sprites with their parents', drawn as
+  lines from `Player::sprite_corners` (kept vectors: nothing allocated a frame);
+  **sort groups in picking** (a grouped sprite at its group's place, after the
+  ungrouped ones there, by its order in the group, as the 2D pass draws them). **Two
+  fixes:** a scene opened with no session yet (its first opening) now opens in 2D by
+  its camera too (only a session's restore did), and the view chip reads `2D` instead
+  of `Perspective`. Tests: an editor on a player with a 2D scene, a click through a
+  clear half to the sprite behind and on an opaque half, the active outline's lines.
+- **Left (E13-1b-8 and later):** Ctrl snapping to a tile map's cells (with E13-3); the
+  2D gizmo's own look. A slice (E13-2) will pass its rectangle of the image to the
+  same picking test.

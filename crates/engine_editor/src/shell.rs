@@ -1250,6 +1250,8 @@ pub struct ShellModel<'a> {
     pub add_at: Option<[f32; 2]>,
     /// The viewport's view mode as its chip reads it (`Lit`, ADR 0116).
     pub view_mode: &'a str,
+    /// How the viewport looks: `Perspective`, or `2D` (ADR 0125's E13-1b).
+    pub projection: &'a str,
     /// The modes' menu below the chip, while it is open.
     pub view_modes: Option<&'a [MenuItem<'a>]>,
     /// The current folder's path.
@@ -2087,7 +2089,7 @@ fn center(
                     },
                     |ui| {
                         ui.row("view menu", chip(false), |ui| {
-                            text(ui, "label", "Perspective", SMALL, p.text);
+                            text(ui, "label", model.projection, SMALL, p.text);
                         });
                         // The view mode (ADR 0116), its menu below it.
                         let opener = ui.row("view mode", chip(model.view_modes.is_some()), |ui| {

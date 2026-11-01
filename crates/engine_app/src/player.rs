@@ -1649,6 +1649,14 @@ impl Player {
             .sprite_at(&self.runtime.world, &mut self.assets, point, &mut opaque)
     }
 
+    /// Entity `e`'s sprite's corners on the XY plane, counter-clockwise from its bottom
+    /// left (ADR 0125's E13-1b: the editor's outline of a selected sprite); `None` without
+    /// a sprite or before its image is made.
+    pub fn sprite_corners(&mut self, e: Entity) -> Option<[engine_core::math::Vec2; 4]> {
+        self.sprites
+            .sprite_corners(&self.runtime.world, &mut self.assets, e)
+    }
+
     /// What the last 2D view's frame recorded (ADR 0125): the sprites drawn, and those its
     /// view culled.
     pub fn sprites_recorded(&self) -> (u32, u32) {

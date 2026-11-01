@@ -7,7 +7,7 @@
 
 use engine_app::{
     Assets, Brush, BrushGroup, BrushOp, BrushShape, Game, MaterialFile, Model, Player,
-    PlayerSettings, Window, builtin,
+    PlayerSettings, Sprite, Window, builtin,
 };
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Entity, Transform, World};
@@ -1744,4 +1744,180 @@ fn the_quick_start_opens_in_the_editor() {
         );
     }
     overlay.destroy(&mut player).unwrap();
+}
+
+/// A 2D scene in the editor (ADR 0125's E13-1b): a click takes the sprite drawn on top
+/// where the click lands, through a clear part of an image to the one behind it, and the
+/// selected sprite is outlined.
+#[test]
+fn a_click_in_the_2d_view_picks_the_sprite_that_shows_there() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-2d-pick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+    // Two 32 × 32 images: a blue square, and one red on its left half, clear on its right.
+    let png = |pixel: &dyn Fn(u32) -> [u8; 4]| {
+        let rgba: Vec<u8> = (0..32 * 32).flat_map(|k| pixel(k % 32)).collect();
+        engine_render::png::encode_png(32, 32, engine_render::png::PngFormat::Rgba, &rgba).unwrap()
+    };
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    let mut image = |file: &str, bytes: Vec<u8>| {
+        let path = format!("art/{file}");
+        std::fs::write(dir.join(&path), bytes).unwrap();
+        let id = AssetId::new();
+        engine_scene::AssetMeta::default()
+            .write(&dir.join(&path), id)
+            .unwrap();
+        paths.insert(AssetRef::file(id), path);
+        id
+    };
+    let blue = image("blue.png", png(&|_| [0, 0, 255, 255]));
+    let half = image(
+        "half.png",
+        png(&|x| {
+            if x < 16 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        }),
+    );
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::IDENTITY,
+        Camera::pixel_art([320, 180], 16.0),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Back"),
+        Transform::IDENTITY,
+        Sprite::new(AssetRef::file(blue)),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Front"),
+        Transform::IDENTITY,
+        Sprite::new(AssetRef::file(half)).on_layer(1, 0),
+    ));
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor 2D pick test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    // As the editor starts: the session begun, which opens the scene in 2D by its camera.
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    let back = engine_scene::find_named(player.world_mut(), "Back").unwrap();
+    let front = engine_scene::find_named(player.world_mut(), "Front").unwrap();
+    // Frames until both images show: red where the front is opaque, blue through its
+    // clear half. The box of the view's pixels of a color, when there are enough.
+    let colored = |rgba: &[u8], view: [u32; 4], pick: fn([f32; 3]) -> bool| {
+        let [x, y, w, h] = view;
+        let (mut lo, mut hi, mut n) = ([u32::MAX; 2], [0u32; 2], 0);
+        for py in y..y + h {
+            for px in x..x + w {
+                let i = ((py * width + px) * 4) as usize;
+                if pick([rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from)) {
+                    lo = [lo[0].min(px), lo[1].min(py)];
+                    hi = [hi[0].max(px), hi[1].max(py)];
+                    n += 1;
+                }
+            }
+        }
+        (n > 100).then_some((lo, hi))
+    };
+    let red: fn([f32; 3]) -> bool = |[r, g, b]| r > 150.0 && g < 80.0 && b < 80.0;
+    let blue_px: fn([f32; 3]) -> bool = |[r, g, b]| b > 150.0 && r < 80.0 && g < 80.0;
+    let mut boxes = None;
+    for _ in 0..300 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let view = game.view_rect().unwrap();
+        if let Ok(path) = std::env::var("ENGINE_EDITOR_2D_PNG") {
+            let png = engine_render::png::encode_png(
+                width,
+                height,
+                engine_render::png::PngFormat::Rgba,
+                &rgba,
+            )
+            .unwrap();
+            std::fs::write(path, png).unwrap();
+        }
+        if let (Some(r), Some(b)) = (colored(&rgba, view, red), colored(&rgba, view, blue_px)) {
+            boxes = Some((r, b));
+            break;
+        }
+    }
+    let ((red_lo, red_hi), (blue_lo, blue_hi)) = boxes.expect("both sprites drawn");
+    assert!(
+        red_hi[0] < blue_lo[0] + 2,
+        "red left of the blue seen through"
+    );
+    let click = |player: &mut Player,
+                 game: &mut EditorGame<NoGame>,
+                 overlay: &mut EditorOverlay,
+                 at: [u32; 2]| {
+        send(
+            game,
+            WindowEventKind::CursorMoved {
+                x: at[0] as i32,
+                y: at[1] as i32,
+            },
+        );
+        for _ in 0..4 {
+            editor_frame(player, game, overlay);
+        }
+        left_click(player, game, overlay);
+    };
+    // The clear half's lower right: the front is on top there but shows nothing.
+    let at = [blue_hi[0] - 6, blue_hi[1] - 6];
+    click(&mut player, &mut game, &mut overlay, at);
+    assert_eq!(game.selection(), [back], "through the clear half at {at:?}");
+    // The red half's lower left (away from the gizmo at the sprites' middle).
+    let at = [red_lo[0] + 6, red_hi[1] - 6];
+    click(&mut player, &mut game, &mut overlay, at);
+    assert_eq!(game.selection(), [front], "the red half at {at:?}");
+    assert_eq!(
+        game.sprite_outline_lines(),
+        [0, 4],
+        "the active sprite's outline"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
