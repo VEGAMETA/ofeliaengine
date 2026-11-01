@@ -883,7 +883,7 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
-  - **E13-2a, slices** (#PR): `sprite.slices` in an image's `.meta`; `Sprite.frame`
+  - **E13-2a, slices** (#516): `sprite.slices` in an image's `.meta`; `Sprite.frame`
     numbers them (clamped), a part (`hero.png#run_1`) names one; drawn and picked at
     the slice's size and pivot.
   - **E13-1b-7, selected sprites outlined; sort groups in picking** (#515); fixes: a
