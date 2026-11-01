@@ -1181,6 +1181,16 @@ impl Assets {
         }
     }
 
+    /// Sprite image `slot`'s texture in `pool` as it is now, whatever views draw (the
+    /// editor's image tab, ADR 0125's E13-2c): its bindless index and size in pixels;
+    /// `None` while it is being made, or when it cannot be.
+    pub(crate) fn sprite_texture(&self, slot: u32, pool: &TexturePool) -> Option<(u32, [f32; 2])> {
+        let state = self.sprite_images.get(slot as usize)?;
+        let id = self.textures.get(&state.key).copied().flatten()?;
+        let info = pool.info(id)?;
+        Some((pool.index(id)?, [info.width as f32, info.height as f32]))
+    }
+
     /// Sprite image `slot`'s frame `frame` as this frame draws it (ADR 0125's E13-2,
     /// [`Self::show_sprite_images`]): its slice of that number (the last for a number past
     /// them), or the whole image when it has none; `None` while its texture is being made,

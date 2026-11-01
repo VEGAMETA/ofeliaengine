@@ -1809,6 +1809,19 @@ where you click. A click on a clear part of an image (under about 10 % opaque) g
 through to what is behind it. Selected sprites are outlined in orange (the active one
 lighter), as selected models are in 3D.
 
+## An image's tab
+
+Double-click an image in the FileSystem dock to open it in a tab of its own: the sheet at
+whole zooms, sampled pixel for pixel, its slices outlined. The wheel zooms about the
+pointer, a middle or right drag pans, **F** frames the sheet. Click a slice to pick it
+(Shift+click picks the run from the last one, Ctrl+click adds or takes one away); the bar
+says its name, frame number and rectangle. **M** makes a clip of the picked frames (the
+run from the lowest to the highest, named `clip_0`, `clip_1`, …, a tenth of a second a
+frame, looping): play it with `Animator::new("clip_0")`. **Delete** takes the picked
+slices away. Each is one undo step; Escape lets go of the picks, Ctrl+W closes the tab.
+Slice the sheet with **Image: Slice by Grid…** or **Image: Slice by Islands** (see the 2D
+guide).
+
 ## Building the game
 
 **Ctrl+Shift+B** (Build: Build the Game) builds the game into `builds/<name>/` in the

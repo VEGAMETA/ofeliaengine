@@ -1649,6 +1649,16 @@ impl Player {
             .sprite_at(&self.runtime.world, &mut self.assets, point, &mut opaque)
     }
 
+    /// Image `image`'s texture as sprites draw it (ADR 0125's E13-2c: the editor's image
+    /// tab): its bindless index and its size in pixels, once made (asked for the first
+    /// time this is called).
+    pub fn sprite_texture(&mut self, image: engine_scene::AssetRef) -> Option<(u32, [f32; 2])> {
+        let slot = self
+            .assets
+            .sprite_slot(engine_scene::AssetRef::file(image.file));
+        self.assets.sprite_texture(slot, &self.textures)
+    }
+
     /// Entity `e`'s sprite's corners on the XY plane, counter-clockwise from its bottom
     /// left (ADR 0125's E13-1b: the editor's outline of a selected sprite); `None` without
     /// a sprite or before its image is made.

@@ -3379,6 +3379,13 @@ struct Editor {
     /// in pixels, for the overlay hook to draw it.
     graph_area: Option<[f32; 4]>,
     graph_rect: Option<[u32; 4]>,
+    /// Images open in their tabs (ADR 0125's E13-2c), the one shown, its canvas's rectangle
+    /// in pixels, its bar's line, and a pan being dragged.
+    sheets: Vec<crate::sheet::SheetDoc>,
+    active_sheet: Option<usize>,
+    sheet_rect: Option<[u32; 4]>,
+    sheet_status: String,
+    sheet_labels: Vec<String>,
     /// Where the node search's pick goes: the graph, the canvas point, and the port a link
     /// was drawn from (ADR 0123 E10-3e).
     graph_add: Option<GraphAdd>,
@@ -4641,6 +4648,11 @@ impl Editor {
             graph_anim: Vec::new(),
             graph_area: None,
             graph_rect: None,
+            sheets: Vec::new(),
+            active_sheet: None,
+            sheet_rect: None,
+            sheet_status: String::new(),
+            sheet_labels: Vec::new(),
             graph_add: None,
             graph_preview: None,
             preview_texture: None,
@@ -7596,6 +7608,17 @@ impl Editor {
                 picked: picked == Some(k),
             }));
         }
+        // The images' tabs (E13-2c): their labels kept between frames.
+        if self.sheet_labels.len() != self.sheets.len()
+            || self
+                .sheet_labels
+                .iter()
+                .zip(&self.sheets)
+                .any(|(l, d)| *l != d.tab)
+        {
+            self.sheet_labels = self.sheets.iter().map(|d| d.tab.clone()).collect();
+        }
+        let sheet_tabs: Vec<&str> = self.sheet_labels.iter().map(String::as_str).collect();
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
@@ -7606,6 +7629,15 @@ impl Editor {
             graph_anim: &self.graph_anim,
             active_graph: self.active_graph,
             graph: graph_bar,
+            sheets: &sheet_tabs,
+            active_sheet: self.active_sheet,
+            sheet: self
+                .active_sheet
+                .and_then(|k| self.sheets.get(k))
+                .map(|doc| crate::shell::SheetBar {
+                    path: &doc.path,
+                    status: &self.sheet_status,
+                }),
             tools: &tools,
             active_tool: self.active_tool,
             tree: &items,
@@ -8172,6 +8204,9 @@ impl Editor {
                         )) if double => {
                             self.open_graph(world, &path);
                         }
+                        Some((engine_scene::AssetKind::Texture, path)) if double => {
+                            self.open_sheet(id, &path.to_string_lossy().replace('\\', "/"));
+                        }
                         _ => {}
                     }
                 }
@@ -8207,6 +8242,11 @@ impl Editor {
             self.close_graph(world, g);
         } else if let Some(g) = response.graph_tab {
             self.show_graph(world, g);
+        }
+        if let Some(k) = response.close_sheet {
+            self.close_sheet(k);
+        } else if let Some(k) = response.sheet_tab {
+            self.show_sheet(k);
         }
         self.find_focus = None;
         self.find_frame(&response);
@@ -8835,6 +8875,13 @@ impl Editor {
             {
                 self.run(world, id);
             }
+        }
+        // An image's sheet covers the viewport (ADR 0125's E13-2c): its pointer and keys,
+        // none of the viewport's tools.
+        if self.active_sheet.is_some() {
+            self.sheet_frame(world, &response, scale);
+            self.input.next_frame();
+            return;
         }
         // A graph's canvas covers the viewport (ADR 0123): its pointer, none of the
         // viewport's tools.
@@ -10728,6 +10775,9 @@ impl Editor {
     /// Image `id`'s `.meta` was written as `meta`: the inspector shows it, the player makes
     /// the image's sprites again.
     fn image_meta_written(&mut self, id: AssetId, meta: &AssetMeta) {
+        for doc in self.sheets.iter_mut().filter(|d| d.id == id) {
+            doc.set_meta(meta);
+        }
         if let Some(asset) = self.inspected.as_mut().filter(|a| a.id == id) {
             asset.meta = meta.clone();
             asset.saved = meta.clone();
@@ -12191,6 +12241,7 @@ impl Editor {
     fn show(&mut self, world: &World, e: Entity) {
         self.active_script = None;
         self.active_graph = None;
+        self.active_sheet = None;
         self.select_only(e);
         let mut at = world.parent(e);
         while let Some(p) = at {
@@ -14480,6 +14531,7 @@ impl Editor {
     fn show_scene_tab(&mut self, world: &mut World, index: usize) {
         self.active_script = None;
         self.active_graph = None;
+        self.active_sheet = None;
         self.show_tab(world, index);
         self.write_session(world);
     }
@@ -14491,9 +14543,200 @@ impl Editor {
         }
         self.active_script = Some(k);
         self.active_graph = None;
+        self.active_sheet = None;
         self.code_focus = true;
         self.caret_since = Instant::now();
         self.write_session(world);
+    }
+
+    /// "Open" on an image (a double click in the dock, ADR 0125's E13-2c): its sheet in a
+    /// tab of its own after the others, or its tab shown when it is open.
+    fn open_sheet(&mut self, id: AssetId, path: &str) {
+        let k = match self.sheets.iter().position(|d| d.id == id) {
+            Some(k) => k,
+            None => {
+                self.sheets
+                    .push(crate::sheet::SheetDoc::open(&self.root, id, path));
+                self.sheets.len() - 1
+            }
+        };
+        self.show_sheet(k);
+    }
+
+    /// Shows image tab `k`: its sheet where the viewport is.
+    fn show_sheet(&mut self, k: usize) {
+        if k >= self.sheets.len() {
+            return;
+        }
+        self.active_script = None;
+        self.active_graph = None;
+        self.active_sheet = Some(k);
+        self.code_focus = false;
+    }
+
+    /// Closes image tab `k` (its edits are in the file already).
+    fn close_sheet(&mut self, k: usize) {
+        if k >= self.sheets.len() {
+            return;
+        }
+        self.sheets.remove(k);
+        self.active_sheet = match self.active_sheet {
+            Some(a) if a == k => None,
+            Some(a) if a > k => Some(a - 1),
+            a => a,
+        };
+    }
+
+    /// The shown image's frame (E13-2c): its canvas's place, framed once its size is known,
+    /// then the wheel (zoom about the pointer), middle or right drags (pan), clicks (pick:
+    /// Shift a range, Ctrl one more) and keys (F frames, Delete takes the picked slices
+    /// away, M makes a clip of them, Escape lets go).
+    fn sheet_frame(&mut self, world: &mut World, response: &ShellResponse, scale: f32) {
+        let Some(k) = self.active_sheet.filter(|&k| k < self.sheets.len()) else {
+            self.active_sheet = None;
+            return;
+        };
+        let Some(r) = self.ui.rect_of(response.sheet_canvas) else {
+            return;
+        };
+        let ([x, y], [w, h]) = (r.pos, r.size);
+        self.sheet_rect = Some([
+            (x * scale).round() as u32,
+            (y * scale).round() as u32,
+            ((w * scale).round() as u32).max(1),
+            ((h * scale).round() as u32).max(1),
+        ]);
+        let free = self.command_palette.is_none()
+            && self.open_choice.is_none()
+            && self.renaming_file.is_none()
+            && self.ui.editing().is_none();
+        let cursor = self.input.cursor().map(|[cx, cy]| [cx / scale, cy / scale]);
+        let over =
+            free && cursor.is_some_and(|[cx, cy]| cx >= x && cy >= y && cx < x + w && cy < y + h);
+        let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+        let doc = &mut self.sheets[k];
+        if !doc.framed && doc.image.is_some() {
+            doc.frame([w, h]);
+        }
+        if over && let Some(at) = cursor {
+            let p = doc.image_point(at, [x, y], [w, h]);
+            let notches = self.input.wheel_notches();
+            if notches != 0.0 {
+                doc.zoom_about(notches, p);
+            }
+            if self.input.held(Button::Middle) || self.input.held(Button::Right) {
+                let [dx, dy] = self.input.drag();
+                doc.pan([dx / scale, dy / scale]);
+            }
+            if self.input.pressed(Button::Left) {
+                let hit = doc.slice_at(p);
+                doc.click(hit, shift, ctrl);
+            }
+        }
+        // Its own keys (F and Delete come through `run`): M a clip, Escape lets go.
+        let mut clip = false;
+        if free {
+            for c in self.input.chords() {
+                if c.ctrl || c.alt || c.shift {
+                    continue;
+                }
+                match c.key {
+                    Key::KeyM if !doc.picked.is_empty() => clip = true,
+                    Key::Escape => {
+                        doc.picked.clear();
+                        doc.anchor = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if clip {
+            self.make_sprite_clip(world);
+        }
+        let doc = &self.sheets[k];
+        doc.status(&mut self.sheet_status);
+    }
+
+    /// The shown image's picked slices taken out of its `.meta` (Delete in its tab), one
+    /// undo step.
+    fn delete_slices(&mut self, world: &mut World) {
+        let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get(k)) else {
+            return;
+        };
+        let mut gone = doc.picked.clone();
+        gone.sort_unstable();
+        let (id, path) = (doc.id, doc.path.clone());
+        let n = gone.len();
+        self.edit_image_meta(world, id, &path, "Delete Slices", |meta| {
+            for &k in gone.iter().rev() {
+                if k < meta.sprite.slices.len() {
+                    meta.sprite.slices.remove(k);
+                }
+            }
+        });
+        if let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get_mut(k)) {
+            doc.picked.clear();
+            doc.anchor = None;
+        }
+        self.say(format!("{path}: {n} slices deleted"));
+    }
+
+    /// M in an image's tab (E13-2c): a clip of the picked frames (the run from the lowest
+    /// to the highest), named `clip_n` with the lowest free number, 0.1 s a frame, looping;
+    /// one undo step.
+    fn make_sprite_clip(&mut self, world: &mut World) {
+        let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get(k)) else {
+            return;
+        };
+        let (Some(&first), Some(&last)) = (doc.picked.iter().min(), doc.picked.iter().max()) else {
+            return;
+        };
+        let (id, path) = (doc.id, doc.path.clone());
+        let mut made = String::new();
+        self.edit_image_meta(world, id, &path, "Make Clip", |meta| {
+            let free = (0..)
+                .map(|n| format!("clip_{n}"))
+                .find(|name| !meta.sprite.clips.iter().any(|c| c.name == *name))
+                .unwrap_or_default();
+            made.clone_from(&free);
+            meta.sprite.clips.push(engine_scene::SpriteClipImport {
+                name: free,
+                first: first as u32,
+                last: last as u32,
+                ..engine_scene::SpriteClipImport::default()
+            });
+        });
+        self.say(format!(
+            "{path}: clip {made} of frames {first} to {last} (play it with Animator::new(\"{made}\"))"
+        ));
+    }
+
+    /// Image `id`'s `.meta` (at `path`) changed by `edit`, written as undo step `name`;
+    /// nothing when it did not change.
+    fn edit_image_meta(
+        &mut self,
+        world: &mut World,
+        id: AssetId,
+        path: &str,
+        name: &str,
+        edit: impl FnOnce(&mut AssetMeta),
+    ) {
+        let file = self.root.join(path);
+        let mut meta = AssetMeta::read(&file);
+        let before = meta.to_text(id);
+        edit(&mut meta);
+        let after = meta.to_text(id);
+        if after == before {
+            return;
+        }
+        if let Err(e) = std::fs::write(AssetMeta::path(&file), &after) {
+            self.say(format!("{path}: not saved ({e})"));
+            return;
+        }
+        self.history.begin(name, None);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+        self.image_meta_written(id, &meta);
     }
 
     /// "Open" on a material graph (a double click in the dock, ADR 0123 E10-3d): the graph
@@ -14523,6 +14766,7 @@ impl Editor {
             return;
         }
         self.active_script = None;
+        self.active_sheet = None;
         self.active_graph = Some(g);
         self.code_focus = false;
         self.graph_drag = None;
@@ -15613,6 +15857,7 @@ impl Editor {
         let canvas = response.graph_canvas;
         let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
             self.active_graph = None;
+            self.active_sheet = None;
             return;
         };
         let Some(r) = self.ui.rect_of(canvas) else {
@@ -17788,6 +18033,7 @@ impl Editor {
     fn open_scene(&mut self, world: &mut World, path: &Path) {
         self.active_script = None;
         self.active_graph = None;
+        self.active_sheet = None;
         if self.scene_path.as_deref() == Some(path) {
             return;
         }
@@ -17863,6 +18109,7 @@ impl Editor {
     fn new_scene(&mut self, world: &mut World) {
         self.active_script = None;
         self.active_graph = None;
+        self.active_sheet = None;
         if self.play.is_some() {
             self.say(String::from(
                 "Stop first: the scene that plays stays in front",
@@ -17942,6 +18189,7 @@ impl Editor {
     fn reopen_scene(&mut self, world: &mut World) {
         self.active_script = None;
         self.active_graph = None;
+        self.active_sheet = None;
         if self.play.is_some() {
             self.say(String::from(
                 "Stop first: the scene that plays stays in front",
@@ -18898,6 +19146,27 @@ impl Editor {
         {
             self.build_command(world, id);
             return;
+        }
+        // An image's tab (ADR 0125's E13-2c): Delete takes its picked slices away, F frames
+        // it, Ctrl+W closes it; the scene's editing commands do nothing there.
+        if let Some(k) = self.active_sheet.filter(|&k| k < self.sheets.len()) {
+            if id == ids.delete {
+                if !self.sheets[k].picked.is_empty() {
+                    self.delete_slices(world);
+                }
+                return;
+            }
+            if id == ids.frame {
+                self.sheets[k].framed = false;
+                return;
+            }
+            if id == ids.close_scene {
+                self.close_sheet(k);
+                return;
+            }
+            if id == ids.duplicate {
+                return;
+            }
         }
         // An animation graph's tab (ADR 0124 E12-5d-1): as a material graph's, Space adding
         // a state; the material graph's own keys (copies, frames, functions) said to be its.
@@ -29692,6 +29961,10 @@ impl<G> EditorGame<G> {
         // The selected sprites' outlines in 2D (E13-1b-7): the pick pass's outline sees
         // only 3D instances.
         shared.sprite_outlines(player);
+        // The open images' textures (E13-2c), the shown one's asked for first.
+        for doc in &mut shared.sheets {
+            doc.image = player.sprite_texture(engine_scene::AssetRef::file(doc.id));
+        }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
@@ -30289,6 +30562,29 @@ impl<G> EditorGame<G> {
                 shared.anchor = None;
             }
         }
+    }
+
+    /// Opens the project's image at `path` in its tab (ADR 0125's E13-2c), as a double
+    /// click on it in the dock does; false when the asset database does not know it.
+    pub fn open_image(&mut self, path: &str) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let Some(id) = shared.asset_db.find(path).map(|e| e.id) else {
+            return false;
+        };
+        shared.open_sheet(id, path);
+        true
+    }
+
+    /// The image tab shown: its slices' count, the picked ones and its bar's line; none
+    /// while no image tab shows. For tests.
+    pub fn image_tab(&self) -> Option<(usize, Vec<usize>, String)> {
+        let shared = self.shared.borrow();
+        let doc = shared.sheets.get(shared.active_sheet?)?;
+        Some((
+            doc.slices.len(),
+            doc.picked.clone(),
+            shared.sheet_status.clone(),
+        ))
     }
 
     /// Runs an editor command by its stable name (`edit.undo`, `edit.redo`, `file.save`,
@@ -32972,6 +33268,19 @@ impl Overlay for EditorOverlay {
                     &mut self.canvas,
                 );
             }
+            // The shown image's sheet (ADR 0125's E13-2c), over the viewport's overlays.
+            if let (Some(k), Some(rect)) = (editor.active_sheet, editor.sheet_rect)
+                && let Some(doc) = editor.sheets.get(k)
+            {
+                crate::sheet::draw(
+                    doc,
+                    rect,
+                    editor.scale.max(0.5),
+                    editor.palette.code,
+                    editor.palette.accent,
+                    &mut self.canvas,
+                );
+            }
             // The shown graph's canvas (ADR 0123 E10-3d), over the viewport's overlays: an
             // animation graph's (ADR 0124 E12-5d-1), or a material graph's.
             if let (Some(g), Some(rect)) = (editor.active_graph, editor.graph_rect)
@@ -34449,6 +34758,62 @@ mod tests {
     /// The 2D view (ADR 0125's E13-1b): an image dropped on it is a sprite of it at the
     /// pointer, its place on whole art pixels, one undo step; View: 2D again is the 3D view
     /// as it was.
+    /// An image's tab (ADR 0125's E13-2c): opened from the dock, frames picked, M makes a
+    /// clip of them, Delete takes slices away (not the scene's entities), each an undo step.
+    #[test]
+    fn an_images_tab_picks_frames_makes_clips_and_deletes_slices() {
+        let (dir, mut world, mut ed, _) = drop_project("image-tab");
+        let png = engine_render::png::encode_png(
+            64,
+            16,
+            engine_render::png::PngFormat::Rgba,
+            &[255u8; 64 * 16 * 4],
+        )
+        .unwrap();
+        std::fs::write(dir.join("props/run.png"), png).unwrap();
+        ed.open_assets();
+        let id = ed.asset_db.find("props/run.png").expect("found").id;
+        ed.reveal_asset(id);
+        ed.slice_image(&mut world, Some(16));
+        let entities = world.len();
+        ed.open_sheet(id, "props/run.png");
+        assert_eq!(ed.active_sheet, Some(0));
+        assert_eq!(ed.sheets[0].slices.len(), 4);
+        // Frames 1 to 3 picked; M.
+        ed.sheets[0].click(Some(1), false, false);
+        ed.sheets[0].click(Some(3), true, false);
+        ed.make_sprite_clip(&mut world);
+        let meta = AssetMeta::read(&dir.join("props/run.png"));
+        let clip = &meta.sprite.clips[0];
+        assert_eq!(
+            (clip.name.as_str(), clip.first, clip.last),
+            ("clip_0", 1, 3)
+        );
+        assert_eq!(ed.sheets[0].clips, 1);
+        // Delete: the picked slices go, the scene's entities stay.
+        ed.sheets[0].click(Some(0), false, false);
+        let delete = ed.ids.delete;
+        ed.run(&mut world, delete);
+        assert_eq!(world.len(), entities);
+        let names: Vec<String> = AssetMeta::read(&dir.join("props/run.png"))
+            .sprite
+            .slices
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["run_1", "run_2", "run_3"]);
+        assert_eq!(ed.sheets[0].slices.len(), 3);
+        // Undone: the slice back, in the tab too.
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(ed.sheets[0].slices.len(), 4);
+        // Another tab shown hides it; its own tab brings it back; closed.
+        ed.show_sheet(0);
+        ed.close_sheet(0);
+        assert!(ed.sheets.is_empty() && ed.active_sheet.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An image sliced in the editor (ADR 0125's E13-2c): by a grid, empty cells left out;
     /// by islands, the slices that stay keeping their names; each an undo step.
     #[test]

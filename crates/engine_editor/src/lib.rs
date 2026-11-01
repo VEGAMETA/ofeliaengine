@@ -44,6 +44,7 @@ mod prefabs;
 mod profile;
 mod script;
 mod session;
+mod sheet;
 pub mod shell;
 mod slang_check;
 mod slang_highlight;
