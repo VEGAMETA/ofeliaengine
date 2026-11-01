@@ -889,7 +889,20 @@ pub struct Assets {
     sprite_slots: HashMap<AssetRef, u32>,
     /// The animators of sprites (E13-2) and the tick's list of them, kept.
     sprite_animators: Option<SpriteAnimators>,
-    sprite_work: Vec<(Entity, AssetRef)>,
+    sprite_work: Vec<(Entity, AssetRef, Option<AssetId>)>,
+    /// Sprites' animation graphs (E13-2e): each animator's, cooked against its sprite's
+    /// image's clips, with its state.
+    sprite_graphs: HashMap<Entity, SpriteGraph>,
+}
+
+/// A sprite's animation graph (ADR 0125's E13-2e): cooked from graph file `file` against
+/// image slot `slot`'s clips (again when either changes), and its state.
+struct SpriteGraph {
+    file: AssetId,
+    slot: u32,
+    generation: u64,
+    graph: engine_anim::AnimGraph,
+    state: engine_anim::GraphState,
 }
 
 type SpriteAnimators = QueryState<(Entity, &'static Animator, &'static crate::Sprite)>;
@@ -1091,28 +1104,136 @@ impl Assets {
         (settings, frames, clips)
     }
 
+    /// One tick of sprite `e`'s animation graph (graph file `file`, ADR 0125's E13-2e):
+    /// cooked against its image's clips the first time (and when either changes), its
+    /// parameters taken from the animator and given back, its state named, the frame of
+    /// the clip weighing most in its first layer shown, that clip's events fired.
+    fn animate_sprite_graph(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        image: AssetRef,
+        file: AssetId,
+        dt: f32,
+    ) {
+        let slot = self.sprite_slot(image);
+        let generation = self.graphs.generation();
+        let stale = self
+            .sprite_graphs
+            .get(&e)
+            .is_none_or(|g| g.file != file || g.slot != slot || g.generation != generation);
+        if stale {
+            let Some(source) = self.graphs.file(file) else {
+                return;
+            };
+            let clips = &self.sprite_images[slot as usize].clips;
+            let Ok((skeleton, _)) = engine_anim::Skeleton::new(&[]) else {
+                return;
+            };
+            let clip = |name: &str| {
+                let k = clips.iter().position(|c| *c.name == *name)?;
+                Some(engine_anim::ClipInfo {
+                    index: u16::try_from(k).ok()?,
+                    length: clips[k].length,
+                    once: clips[k].once,
+                })
+            };
+            let (graph, problems) = engine_anim::AnimGraph::cook(&source.desc, clip, &skeleton);
+            for p in &problems {
+                log::warn!(
+                    target: "engine_app",
+                    "animation graph {} on a sprite: {}: {}",
+                    source.source,
+                    p.what,
+                    p.why
+                );
+            }
+            let state = engine_anim::GraphState::new(&graph);
+            self.sprite_graphs.insert(
+                e,
+                SpriteGraph {
+                    file,
+                    slot,
+                    generation,
+                    graph,
+                    state,
+                },
+            );
+        }
+        let Some(sg) = self.sprite_graphs.get_mut(&e) else {
+            return;
+        };
+        let Some(animator) = world.get_mut::<Animator>(e) else {
+            return;
+        };
+        set_params(&mut sg.state, animator, &sg.graph);
+        let step = if animator.paused {
+            0.0
+        } else {
+            dt * animator.speed
+        };
+        sg.graph.tick(&mut sg.state, step);
+        let count = sg.graph.params().count().min(MAX_GRAPH_PARAMS);
+        for (k, value) in animator.params.iter_mut().enumerate().take(count) {
+            *value = sg.state.get(k as u16);
+        }
+        let name = sg.graph.state_name(&sg.state, 0).unwrap_or_default();
+        if animator.state != name {
+            animator.state.clear();
+            animator.state.push_str(name);
+        }
+        let heaviest = sg
+            .graph
+            .played(&sg.state, 0)
+            .max_by(|a, b| a.weight.total_cmp(&b.weight));
+        let clips = &self.sprite_images[slot as usize].clips;
+        let Some((clip, p)) = heaviest.and_then(|p| Some((clips.get(usize::from(p.clip))?, p)))
+        else {
+            return;
+        };
+        let frame = clip.frame_at(p.to);
+        let fired = &mut self.fields.fired;
+        crossed(&clip.events, clip.length, p.from, p.to, |event| {
+            fired.push((e, event.clone()));
+        });
+        if world
+            .get::<crate::Sprite>(e)
+            .is_some_and(|s| s.frame != frame)
+            && let Some(sprite) = world.get_mut::<crate::Sprite>(e)
+        {
+            sprite.frame = frame;
+        }
+    }
+
     /// One tick of the animators of sprites (ADR 0125's E13-2, after the animators moved
     /// on): an animator whose clip is one of its sprite's image's (not among its own
     /// `.anim` clips, not a graph) shows the clip's frame at its time, learns the clip's
     /// length and whether it holds, and fires the events its tick passed. Writes only what
     /// changed; allocates nothing once its vectors have grown.
-    pub(crate) fn animate_sprites(&mut self, world: &mut World) {
+    pub(crate) fn animate_sprites(&mut self, world: &mut World, dt: f32) {
         let query = self
             .sprite_animators
             .get_or_insert_with(|| QueryState::new(world));
         let mut work = core::mem::take(&mut self.sprite_work);
         work.clear();
         query.for_each_readonly(world, |(e, animator, sprite)| {
-            if sprite.image.is_none()
-                || sprite.image.part != 0
-                || animator.plays_graph()
-                || animator.clips.contains_key(&animator.clip)
-            {
+            if sprite.image.is_none() || sprite.image.part != 0 {
                 return;
             }
-            work.push((e, sprite.image));
+            if animator.plays_graph() {
+                work.push((e, sprite.image, Some(animator.graph.file)));
+                return;
+            }
+            if animator.clips.contains_key(&animator.clip) {
+                return;
+            }
+            work.push((e, sprite.image, None));
         });
-        for &(e, image) in &work {
+        for &(e, image, graph) in &work {
+            if let Some(file) = graph {
+                self.animate_sprite_graph(world, e, image, file, dt);
+                continue;
+            }
             let slot = self.sprite_slot(image) as usize;
             let Some(animator) = world.get::<Animator>(e) else {
                 continue;
@@ -1664,6 +1785,7 @@ impl Assets {
             sprite_slots: HashMap::new(),
             sprite_animators: None,
             sprite_work: Vec::new(),
+            sprite_graphs: HashMap::new(),
         }
     }
 

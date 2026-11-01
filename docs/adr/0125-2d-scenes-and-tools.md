@@ -1006,3 +1006,23 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   kept within a small slice's half.
 - **Left (E13-2e and later):** graphs of sprite clips; Aseprite files; a clip's frames
   changed in the tab; renames followed in scenes not open.
+
+## As built (E13-2e, 2026-11-01): animation graphs on sprites
+
+- An `Animator` with a `graph` on an entity with a `Sprite` plays the graph on it
+  (`Assets::animate_sprite_graph`, in the sprites' step of the tick): the `.agraph`
+  (`Graphs::file`, read as any graph is) cooked against the image's clips (`ClipInfo`:
+  index, length, once; a skeleton of no joints, so masks name nothing) the first time and
+  again when the graph file, the image slot or the graphs' generation changes; its
+  parameters taken from the animator and given back, `animator.state` named, as a
+  character's graph does (ADR 0124's E12-5c).
+- **Frames do not blend:** the sprite shows the frame (`SpriteClip::frame_at`) of the
+  clip weighing most in the first layer at its played time, so a cross-fade cuts where
+  the incoming clip outweighs the outgoing one; that clip's events fire over the tick's
+  span. Blend nodes pick their heaviest clip likewise.
+- Tests: on both GPUs' test an `.agraph` with Idle and Run states over an image's clips,
+  the state Idle and frame 0, then a parameter set: the state Run and the run clip's
+  frames shown in turn.
+- **Left (E13-2f and later):** Aseprite files; a clip's frames changed in the tab;
+  renames followed in scenes not open; a despawned sprite's graph state let go (kept
+  until the entity's index is reused).

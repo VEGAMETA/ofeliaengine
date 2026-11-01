@@ -404,6 +404,102 @@ fn a_sliced_sprite_keeps_its_border_when_stretched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A sprite's animation graph (ADR 0125's E13-2e): an `.agraph` whose states play the
+/// image's clips, cooked against them; its parameter moves it from idle to run, the
+/// sprite showing the run's frames and the animator naming its state.
+#[test]
+fn an_animation_graph_plays_a_sprites_clips() {
+    // 48 × 16: three frames, red then green then blue.
+    let sheet = image(48, 16, |x, _| match x / 16 {
+        0 => [255, 0, 0, 255],
+        1 => [0, 255, 0, 255],
+        _ => [0, 0, 255, 255],
+    });
+    let slice = |k: u32| SliceImport {
+        name: format!("f{k}"),
+        rect: [16 * k, 0, 16, 16],
+        ..SliceImport::default()
+    };
+    let clip = |name: &str, first: u32, last: u32| SpriteClipImport {
+        name: String::from(name),
+        first,
+        last,
+        frame_time: 0.25,
+        ..SpriteClipImport::default()
+    };
+    let import = SpriteImport {
+        slices: vec![slice(0), slice(1), slice(2)],
+        clips: vec![clip("idle", 0, 0), clip("run", 1, 2)],
+        ..SpriteImport::default()
+    };
+    let (dir, mut paths, ids) = project("graph", &[("hero.png", sheet, import)]);
+    let graph_id = AssetId::new();
+    let graph = format!(
+        "[agraph version=1 id={graph_id}]
+
+params[\"speed\"].kind = Float
+layers[\"base\"].name = \"Base\"
+layers[\"base\"].root = \"m0\"
+nodes[\"m0\"].kind = Machine
+nodes[\"m0\"].entry = \"idle\"
+nodes[\"c1\"].clip = \"idle\"
+nodes[\"c2\"].clip = \"run\"
+states[\"idle\"].machine = \"m0\"
+states[\"idle\"].name = \"Idle\"
+states[\"idle\"].pose = \"c1\"
+states[\"run\"].machine = \"m0\"
+states[\"run\"].name = \"Run\"
+states[\"run\"].pose = \"c2\"
+transitions[\"t1\"].from = \"idle\"
+transitions[\"t1\"].to = \"run\"
+transitions[\"t1\"].when = \"speed > 1\"
+"
+    );
+    std::fs::write(dir.join("art/hero.agraph"), graph).unwrap();
+    paths.insert(AssetRef::file(graph_id), "art/hero.agraph");
+    let Some(mut player) = player(&dir, &paths) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let world = player.world_mut();
+    camera(world);
+    let hero = world.spawn((
+        Transform::IDENTITY,
+        GlobalTransform::IDENTITY,
+        Sprite::new(AssetRef::file(ids[0])),
+        Animator {
+            graph: AssetRef::file(graph_id),
+            ..Animator::new("")
+        },
+    ));
+    let mut game = Slides(None);
+    for _ in 0..30 {
+        player.frame(&mut game).unwrap();
+    }
+    let world = player.world_mut();
+    assert_eq!(world.get::<Animator>(hero).unwrap().state, "Idle");
+    assert_eq!(world.get::<Sprite>(hero).unwrap().frame, 0, "idle's frame");
+    // Running: the graph goes to Run, the sprite shows its frames 1 and 2 in turn.
+    {
+        let animator = world.get_mut::<Animator>(hero).unwrap();
+        animator.params[0] = 3.0;
+        animator.params_set = 1;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..60 {
+        player.frame(&mut game).unwrap();
+        seen.insert(player.world_mut().get::<Sprite>(hero).unwrap().frame);
+    }
+    let world = player.world_mut();
+    assert_eq!(world.get::<Animator>(hero).unwrap().state, "Run");
+    assert!(
+        seen.contains(&1) && seen.contains(&2),
+        "run's frames: {seen:?}"
+    );
+    assert_valid(&player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Layers, then order within a layer; y in a layer that sorts by y; a sort group's parts
 /// together at the group's place.
 #[test]
