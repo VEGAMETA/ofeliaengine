@@ -923,6 +923,9 @@ pub(crate) struct SpriteImage {
     /// The part of the texture drawn: min u, min v, max u, max v (the image's top at v 0);
     /// a frame's slice (E13-2), else all of it.
     pub(crate) uv: [f32; 4],
+    /// The frame's nine-slice border in pixels (left, top, right, bottom; E13-2d): what a
+    /// sliced sprite keeps unstretched.
+    pub(crate) border: [f32; 4],
 }
 
 /// A sprite clip laid out to play (ADR 0125's E13-2): the moment each of its frames
@@ -984,6 +987,8 @@ impl SpriteClip {
 pub(crate) struct SpriteFrame {
     pub(crate) rect: [f32; 4],
     pub(crate) pivot: Vec2,
+    /// Its nine-slice border in pixels: left, top, right, bottom.
+    pub(crate) border: [f32; 4],
 }
 
 impl SpriteImage {
@@ -999,6 +1004,7 @@ impl SpriteImage {
             size: Vec2::new(w, h),
             pivot: frame.pivot,
             uv: [x / full.x, y / full.y, (x + w) / full.x, (y + h) / full.y],
+            border: frame.border,
             ..self
         }
     }
@@ -1047,6 +1053,7 @@ impl Assets {
         let frame = |s: &engine_scene::SliceImport| SpriteFrame {
             rect: s.rect.map(|v| v as f32),
             pivot: Vec2::from_array(s.pivot),
+            border: s.border.map(|v| v as f32),
         };
         let frames = if asset.part == 0 {
             meta.slices.iter().map(frame).collect()
@@ -1073,6 +1080,7 @@ impl Assets {
                 SpriteFilter::Linear => SamplerKind::LinearClamp,
             },
             uv: SpriteImage::ALL,
+            border: [0.0; 4],
         };
         // A part is one slice: no clips.
         let clips = if asset.part == 0 {

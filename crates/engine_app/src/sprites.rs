@@ -557,25 +557,33 @@ impl Sprites {
                 let Some(pose) = pose_at(entry, e, &global.0, tick, alpha) else {
                     continue;
                 };
-                let Some(quad) = quad(sprite, &image, &pose, view) else {
+                let Some(whole) = quad(sprite, &image, &pose, view) else {
                     culled += 1;
                     continue;
                 };
                 drawn_count += 1;
-                if entry.stamp == frame {
-                    members.push(Member {
-                        group: entry.group,
-                        order: sprite.order,
-                        seq,
-                        quad,
-                    });
-                    seq += 1;
-                } else {
-                    canvas.draw(&Quad {
-                        order: order(sorting, sprite.layer, sprite.order, pose[5]),
-                        ..quad
-                    });
-                }
+                let grouped = entry.stamp == frame;
+                let (group, place) = (
+                    entry.group,
+                    order(sorting, sprite.layer, sprite.order, pose[5]),
+                );
+                // Its pieces (E13-2d): one quad, nine when sliced, a grid when tiled.
+                pieces(sprite, &image, &whole, |quad| {
+                    if grouped {
+                        members.push(Member {
+                            group,
+                            order: sprite.order,
+                            seq,
+                            quad,
+                        });
+                        seq += 1;
+                    } else {
+                        canvas.draw(&Quad {
+                            order: place,
+                            ..quad
+                        });
+                    }
+                });
             }
         });
         // The groups' sprites, each group's together in its own order (the canvas keeps
@@ -716,6 +724,123 @@ fn sort_group_of(world: &World, e: Entity) -> Option<(Entity, SortGroup, f32)> {
     None
 }
 
+/// The most quads a tiled sprite is drawn with (E13-2d): beyond it, its tiles grow.
+const MAX_TILES: f32 = 4096.0;
+
+/// `whole`, `sprite`'s quad, as it is drawn (ADR 0125's E13-2d): as it is when simple;
+/// nine pieces when sliced, its border's corners kept at their pixels' size, its edges
+/// stretched one way and its middle both; when tiled, its frame repeated at its own size
+/// over the quad from its bottom left, the last row and column cut. Each piece goes to
+/// `out`; nothing is allocated.
+fn pieces(sprite: &Sprite, image: &SpriteImage, whole: &Quad, mut out: impl FnMut(Quad)) {
+    let own = image.size / image.pixels_per_unit;
+    let size = Vec2::new(
+        if sprite.size.x == 0.0 {
+            own.x
+        } else {
+            sprite.size.x
+        },
+        if sprite.size.y == 0.0 {
+            own.y
+        } else {
+            sprite.size.y
+        },
+    );
+    // A piece: local rectangle [a0, a1] × [b0, b1] of the unit quad (y up) showing the
+    // shares [f0, f1] × [g0, g1] of the frame (from the left, from the top).
+    let piece = |a: [f32; 2], b: [f32; 2], f: [f32; 2], g: [f32; 2]| {
+        let [u0, v0, u1, v1] = whole.uv;
+        let (x, y) = (
+            whole.transform.matrix2.x_axis,
+            whole.transform.matrix2.y_axis,
+        );
+        Quad {
+            transform: Affine2 {
+                matrix2: Mat2::from_cols(x * (a[1] - a[0]), y * (b[1] - b[0])),
+                translation: whole.transform.translation
+                    + x * ((a[0] + a[1]) * 0.5)
+                    + y * ((b[0] + b[1]) * 0.5),
+            },
+            uv: [
+                u0 + f[0] * (u1 - u0),
+                v0 + g[0] * (v1 - v0),
+                u0 + f[1] * (u1 - u0),
+                v0 + g[1] * (v1 - v0),
+            ],
+            ..*whole
+        }
+    };
+    match sprite.mode {
+        Sprite::SLICED if image.border.iter().any(|&b| b > 0.0) => {
+            // The border in the frame's shares and in the quad's: a flipped sprite's
+            // sides swap.
+            let [mut l, mut t, mut r, mut b] = image.border;
+            if sprite.flip_x != 0 {
+                (l, r) = (r, l);
+            }
+            if sprite.flip_y != 0 {
+                (t, b) = (b, t);
+            }
+            let (fw, fh) = (image.size.x.max(1.0), image.size.y.max(1.0));
+            let ppu = image.pixels_per_unit;
+            // Corners at their pixels' size, shrunk together when the quad is smaller.
+            let kx = ((l + r) / ppu / size.x.max(1e-6)).max(1.0);
+            let ky = ((t + b) / ppu / size.y.max(1e-6)).max(1.0);
+            let (la, ra) = (l / ppu / size.x / kx, r / ppu / size.x / kx);
+            let (ta, ba) = (t / ppu / size.y / ky, b / ppu / size.y / ky);
+            let xs = [-0.5, -0.5 + la, 0.5 - ra, 0.5];
+            let fs = [0.0, l / fw, 1.0 - r / fw, 1.0];
+            let ys = [0.5, 0.5 - ta, -0.5 + ba, -0.5];
+            let gs = [0.0, t / fh, 1.0 - b / fh, 1.0];
+            for row in 0..3 {
+                for col in 0..3 {
+                    if xs[col + 1] - xs[col] <= 1e-6 || ys[row] - ys[row + 1] <= 1e-6 {
+                        continue;
+                    }
+                    out(piece(
+                        [xs[col], xs[col + 1]],
+                        [ys[row + 1], ys[row]],
+                        [fs[col], fs[col + 1]],
+                        [gs[row], gs[row + 1]],
+                    ));
+                }
+            }
+        }
+        Sprite::TILED if own.x > 0.0 && own.y > 0.0 => {
+            // Tiles of the frame's own size (larger when there would be too many).
+            let mut tile = own;
+            let count = (size.x / tile.x).ceil() * (size.y / tile.y).ceil();
+            if count > MAX_TILES {
+                tile *= (count / MAX_TILES).sqrt();
+            }
+            let (nx, ny) = (
+                (size.x / tile.x).ceil() as u32,
+                (size.y / tile.y).ceil() as u32,
+            );
+            let (sx, sy) = (tile.x / size.x, tile.y / size.y);
+            for j in 0..ny {
+                // From the bottom: the cut row at the top.
+                let b0 = -0.5 + j as f32 * sy;
+                let b1 = (b0 + sy).min(0.5);
+                let shown_y = (b1 - b0) / sy;
+                for i in 0..nx {
+                    let a0 = -0.5 + i as f32 * sx;
+                    let a1 = (a0 + sx).min(0.5);
+                    let shown_x = (a1 - a0) / sx;
+                    // A cut tile shows its frame's left and bottom part.
+                    out(piece(
+                        [a0, a1],
+                        [b0, b1],
+                        [0.0, shown_x],
+                        [1.0 - shown_y, 1.0],
+                    ));
+                }
+            }
+        }
+        _ => out(*whole),
+    }
+}
+
 /// `sprite`'s quad at `pose` (its order still to set), or `None` when wholly outside
 /// `view`.
 fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect>) -> Option<Quad> {
@@ -766,6 +891,7 @@ mod tests {
             pivot,
             sampler: SamplerKind::NearestClamp,
             uv: SpriteImage::ALL,
+            border: [0.0; 4],
         }
     }
 
@@ -780,6 +906,7 @@ mod tests {
         let frame = crate::assets::SpriteFrame {
             rect: [32.0, 0.0, 16.0, 16.0],
             pivot: Vec2::new(0.5, 0.0),
+            border: [0.0; 4],
         };
         let third = sheet.framed(&frame);
         assert_eq!(third.size, Vec2::splat(16.0));
@@ -801,6 +928,62 @@ mod tests {
             (uv - Vec2::new(0.7375, 0.05)).abs().max_element() < 1e-5,
             "{uv}"
         );
+    }
+
+    /// A sliced sprite (E13-2d): nine pieces, its corners at their pixels' size, its
+    /// middle stretched; a tiled one: its frame repeated, the last row and column cut.
+    #[test]
+    fn sliced_and_tiled_sprites_are_drawn_in_pieces() {
+        // A 16 × 16 panel with a 4-pixel border, drawn 3 × 2 metres (48 × 32 pixels).
+        let mut panel = image(16.0, 16.0, Vec2::splat(0.5));
+        panel.border = [4.0; 4];
+        let mut sprite = Sprite::new(AssetRef::NONE);
+        sprite.size = Vec2::new(3.0, 2.0);
+        sprite.mode = Sprite::SLICED;
+        let whole = quad(&sprite, &panel, &STILL, None).unwrap();
+        let mut got = Vec::new();
+        pieces(&sprite, &panel, &whole, |q| got.push(q));
+        assert_eq!(got.len(), 9);
+        // The top left corner: a quarter metre square at the top left, its pixels the
+        // frame's top left 4 × 4.
+        let tl = got[0];
+        assert!((tl.transform.matrix2.x_axis.x - 0.25).abs() < 1e-5);
+        assert!((tl.transform.matrix2.y_axis.y - 0.25).abs() < 1e-5);
+        assert!(
+            (tl.transform.translation - Vec2::new(-1.375, 0.875))
+                .abs()
+                .max_element()
+                < 1e-5
+        );
+        assert_eq!(tl.uv, [0.0, 0.0, 0.25, 0.25]);
+        // The middle: stretched to 2.5 × 1.5 metres, its pixels the frame's middle.
+        let mid = got[4];
+        assert!((mid.transform.matrix2.x_axis.x - 2.5).abs() < 1e-5);
+        assert!((mid.transform.matrix2.y_axis.y - 1.5).abs() < 1e-5);
+        assert_eq!(mid.uv, [0.25, 0.25, 0.75, 0.75]);
+        // Tiled at 2.5 × 1 metres: three columns (the last half shown), one row.
+        sprite.mode = Sprite::TILED;
+        sprite.size = Vec2::new(2.5, 1.0);
+        let whole = quad(&sprite, &panel, &STILL, None).unwrap();
+        got.clear();
+        pieces(&sprite, &panel, &whole, |q| got.push(q));
+        assert_eq!(got.len(), 3);
+        assert!((got[2].transform.matrix2.x_axis.x - 0.5).abs() < 1e-5);
+        let want = [0.0, 0.0, 0.5, 1.0];
+        assert!(
+            got[2]
+                .uv
+                .iter()
+                .zip(want)
+                .all(|(a, b)| (a - b).abs() < 1e-5),
+            "{:?}",
+            got[2].uv
+        );
+        // Simple: one piece, the whole.
+        sprite.mode = Sprite::SIMPLE;
+        got.clear();
+        pieces(&sprite, &panel, &whole, |q| got.push(q));
+        assert_eq!(got.len(), 1);
     }
 
     /// A sprite's rectangle as picking sees it: around its pivot, turned with it.
