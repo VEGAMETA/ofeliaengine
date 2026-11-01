@@ -1828,7 +1828,10 @@ the tab's bar (Enter keeps it, Escape leaves it); sprites of the open scene that
 The image's clips show as chips under the tab's bar (`run 4–9 · 80 ms · loop`). Click one
 to choose it: its frames are outlined in green and it plays in the canvas's top right
 corner as the game will play it; click it again (or Escape) to let go. With a clip chosen,
-**F2** renames it and **Delete** takes it away (the slices stay). Each is one undo step; Escape lets go
+**F2** renames it and **Delete** takes it away (the slices stay); **Image: Clip Frame
+Time…** (42 to 200 ms a frame) and **Image: Clip Mode…** (loop, once, ping-pong) set how
+it plays. With one slice picked, drag its pivot cross to move the point it stands on (it
+snaps to pixels' corners and centres inside the slice). Each is one undo step; Escape lets go
 of the picks, Ctrl+W closes the tab.
 Slice the sheet with **Image: Slice by Grid…** or **Image: Slice by Islands** (see the 2D
 guide).

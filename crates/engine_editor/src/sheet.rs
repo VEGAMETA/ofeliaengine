@@ -56,6 +56,29 @@ pub(crate) struct SheetDoc {
     /// Its pixels, read from its file the first time a slice is fitted (RGBA8, rows from
     /// the top) with its size.
     pub(crate) pixels: Option<([u32; 2], Vec<u8>)>,
+    /// The picked slice whose pivot is being dragged (E13-2c-6), shown where the pointer
+    /// put it until the release writes it.
+    pub(crate) pivot_drag: Option<usize>,
+}
+
+impl SheetDoc {
+    /// Slice `k`'s pivot in image pixels (from the image's top left).
+    pub(crate) fn pivot_point(&self, k: usize) -> Option<[f32; 2]> {
+        let s = self.slices.get(k)?;
+        let [x, y, w, h] = s.rect.map(|v| v as f32);
+        Some([x + w * s.pivot[0], y + h * (1.0 - s.pivot[1])])
+    }
+
+    /// The pivot of slice `k` at image point `p`, on the nearest pixel corner or centre
+    /// inside the slice, as shares of its size from its bottom left.
+    pub(crate) fn pivot_at(&self, k: usize, p: [f32; 2]) -> Option<[f32; 2]> {
+        let s = self.slices.get(k)?;
+        let [x, y, w, h] = s.rect.map(|v| v as f32);
+        let snap = |v: f32| (v * 2.0).round() / 2.0;
+        let px = snap(p[0]).clamp(x, x + w);
+        let py = snap(p[1]).clamp(y, y + h);
+        Some([(px - x) / w.max(1.0), 1.0 - (py - y) / h.max(1.0)])
+    }
 }
 
 /// A clip's chip: its name, frames, frame time and mode (`run 4–9 · 80 ms · loop`).
@@ -171,6 +194,7 @@ impl SheetDoc {
             drawing: None,
             last_press: None,
             pixels: None,
+            pivot_drag: None,
         };
         doc.read_meta(root);
         doc
@@ -493,7 +517,23 @@ mod tests {
             drawing: None,
             last_press: None,
             pixels: None,
+            pivot_drag: None,
         }
+    }
+
+    /// A pivot sits where the slice's shares say, and dragging snaps it to half pixels
+    /// inside the slice.
+    #[test]
+    fn pivots_map_to_pixels_and_snap_inside_their_slice() {
+        let mut doc = sheet();
+        doc.slices[1].pivot = [0.5, 0.0];
+        assert_eq!(doc.pivot_point(1), Some([24.0, 16.0]), "b's feet");
+        assert_eq!(doc.pivot_at(1, [19.2, 4.1]), Some([0.1875, 0.75]));
+        assert_eq!(
+            doc.pivot_at(1, [99.0, -5.0]),
+            Some([1.0, 1.0]),
+            "kept inside"
+        );
     }
 
     /// A clip's preview plays its frames as the player does; its chip says what it is.
