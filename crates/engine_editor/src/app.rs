@@ -1339,6 +1339,9 @@ struct CommandIds {
     place_blend: CommandId,
     /// Tab on a character: its joints take the pointer (ADR 0124's E12-1c).
     edit_joints: CommandId,
+    paint_tiles: CommandId,
+    tile_brush: CommandId,
+    new_tile_set: CommandId,
     /// View: Sound Ranges (E11-4c): every source's reach and every zone, dim.
     sound_ranges: CommandId,
     docks_beside_code: CommandId,
@@ -1606,6 +1609,9 @@ fn commands() -> (Commands, CommandIds) {
         anim_states: c.register("view.anim_states", "View", "Animation States"),
         place_blend: c.register("anim.place_blend", "Animation", "Place Blend by Speed"),
         edit_joints: c.register("anim.edit_joints", "Animation", "Edit Joints"),
+        paint_tiles: c.register("tiles.paint", "Tiles", "Paint Tiles"),
+        tile_brush: c.register("tiles.brush", "Tiles", "Pick Brush…"),
+        new_tile_set: c.register("image.new_tile_set", "Image", "New Tile Set…"),
         sound_ranges: c.register("view.sound_ranges", "View", "Sound Ranges"),
         docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
         navigation: c.register("view.navigation", "View", "Navigation"),
@@ -2577,6 +2583,10 @@ enum Pick {
     ClipTime(u32),
     /// Sets the picked slices' nine-slice border, this many pixels each side (E13-2d).
     SliceBorder(u32),
+    /// The tile painting's brush: a cell's value (E13-3c).
+    TileBrush(String),
+    /// A tile set of the inspected image, cells this many pixels square (E13-3c).
+    NewTileSet(u32),
     /// Sets the chosen clip's mode (E13-2c-6).
     ClipMode(engine_scene::SpriteClipMode),
     /// Keeps a change made while playing, or not (E3-3).
@@ -3920,6 +3930,10 @@ struct Editor {
     gizmo_drag: Option<GizmoDrag>,
     /// Editing brushes' faces (Tab, ADR 0110 E2b-5).
     face_edit: Option<FaceEdit>,
+    /// Painting a tile map (Tab, ADR 0125's E13-3c).
+    tile_paint: Option<crate::tiles::TilePaint>,
+    /// What tile painting paints (a cell's value), kept between paintings.
+    tile_brush: Option<String>,
     /// A blockout group to write as a glTF once the player's frame is at hand (E2b-6).
     export_group: Option<Entity>,
     /// Blockout groups to bake once the player's frame is at hand (E2b-6).
@@ -4957,6 +4971,8 @@ impl Editor {
             gizmo_shown: false,
             gizmo_drag: None,
             face_edit: None,
+            tile_paint: None,
+            tile_brush: None,
             export_group: None,
             bake_groups: Vec::new(),
             play: None,
@@ -5415,6 +5431,10 @@ impl Editor {
         if self.draw.is_some() {
             self.draw_frame(world);
         }
+        // Painting a tile map (E13-3c): its buttons before the camera's and the picking's.
+        if self.tile_paint.is_some() {
+            self.tiles_frame(world);
+        }
         // Tab over the viewport edits faces, as in Blender; over the panels, or while a
         // field is typed in, it goes to the next field.
         let over_view = self.view_rect.is_some_and(|[x, y, w, h]| {
@@ -5435,8 +5455,15 @@ impl Editor {
             .skeleton_view
             .as_ref()
             .is_some_and(|v| self.selection.last() == Some(&v.entity));
+        let tile_map = self.tile_paint.is_some()
+            || self
+                .selection
+                .last()
+                .is_some_and(|&e| world.get::<engine_app::TileMap>(e).is_some());
         let tab = if self.active_graph.is_some() {
             over_graph.then_some(self.ids.enter_function)
+        } else if tile_map {
+            over_view.then_some(self.ids.paint_tiles)
         } else if character {
             over_view.then_some(self.ids.edit_joints)
         } else {
@@ -6657,6 +6684,17 @@ impl Editor {
         }
         if self.face_edit.is_some() {
             let _ = write!(self.status, "{FACES_HELP}  ·  ");
+        }
+        if let Some(paint) = &self.tile_paint {
+            let brush = self.tile_brush.as_deref().unwrap_or("none");
+            let cell = paint
+                .hovered
+                .map_or_else(String::new, |(x, y)| format!(" at {x}, {y}"));
+            let _ = write!(
+                self.status,
+                "Painting tiles with {brush}{cell}  ·  {}  ·  ",
+                crate::tiles::HELP
+            );
         }
         if self.joint_edit.is_some() {
             let picked = self
@@ -9807,6 +9845,11 @@ impl Editor {
                             Pick::SliceGrid(cell) => self.slice_image(world, Some(cell)),
                             Pick::SlicePivot(k) => self.set_slice_pivot(world, k),
                             Pick::SliceBorder(px) => self.set_slice_border(world, px),
+                            Pick::TileBrush(value) => {
+                                self.say(format!("Brush: {value}"));
+                                self.tile_brush = Some(value);
+                            }
+                            Pick::NewTileSet(cell) => self.new_tile_set(cell),
                             Pick::ClipTime(ms) => self.set_clip(world, "Clip Frame Time", |c| {
                                 c.frame_time = ms as f32 / 1000.0;
                                 c.durations.clear();
@@ -11330,6 +11373,301 @@ impl Editor {
             }
             None => self.say(String::from("Select a character to pick its joints (Tab)")),
         }
+    }
+
+    /// Tab with a tile map selected (ADR 0125's E13-3c): painting it, or leaving that (a
+    /// stroke under way kept as its step).
+    fn toggle_tile_paint(&mut self, world: &mut World) {
+        if let Some(paint) = self.tile_paint.take() {
+            if paint.stroke.is_some() {
+                self.history.commit(world);
+            }
+            return;
+        }
+        let Some(e) = self
+            .selection
+            .last()
+            .copied()
+            .filter(|&e| world.get::<engine_app::TileMap>(e).is_some())
+        else {
+            self.say(String::from("Select a tile map to paint it (Tab)"));
+            return;
+        };
+        let Some(set) = self.tile_set_of(world, e) else {
+            self.say(String::from(
+                "The tile map has no tile set to paint from: drop a .tileset on it",
+            ));
+            return;
+        };
+        let ppu = if set.pixels_per_unit > 0.0 {
+            set.pixels_per_unit
+        } else {
+            16.0
+        };
+        self.tile_paint = Some(crate::tiles::TilePaint {
+            entity: e,
+            cell: Vec2::new(set.tile[0] as f32, set.tile[1] as f32) / ppu,
+            stroke: None,
+            hovered: None,
+        });
+        if self.tile_brush.is_none() {
+            self.say(String::from(
+                "Painting: Ctrl+click a cell or Tiles: Pick Brush… gives the brush",
+            ));
+        }
+    }
+
+    /// Tile map `e`'s tile set as its file holds it, if it names one that reads.
+    fn tile_set_of(&self, world: &World, e: Entity) -> Option<engine_scene::TileSetFile> {
+        let id = world.get::<engine_app::TileMap>(e)?.tile_set.file;
+        let path = self.asset_db.get(id)?.path.clone();
+        engine_scene::TileSetFile::load(&self.root.join(&path)).ok()
+    }
+
+    /// Painting tiles' frame (E13-3c): the cell under the pointer on the map's plane; a
+    /// left press paints the brush there and on through the cells the pointer crosses
+    /// until the release (right erases), one undo step; Ctrl+click picks the cell's tile as
+    /// the brush. The view's presses are the painting's; Escape leaves.
+    fn tiles_frame(&mut self, world: &mut World) {
+        use crate::tiles::{Stroke, cell_at, line};
+        let Some(mut paint) = self.tile_paint.take() else {
+            return;
+        };
+        let gone = world.get::<engine_app::TileMap>(paint.entity).is_none();
+        if gone || self.ui.input().keys.contains(&UiKey::Escape) {
+            if paint.stroke.is_some() {
+                self.history.commit(world);
+            }
+            return;
+        }
+        let over = self.view_rect.is_some_and(|[x, y, w, h]| {
+            self.input.cursor().is_some_and(|[cx, cy]| {
+                cx >= x as f32 && cy >= y as f32 && cx < (x + w) as f32 && cy < (y + h) as f32
+            })
+        });
+        paint.hovered = None;
+        if over && let (Some(rect), Some([x, y])) = (self.view_rect, self.input.cursor()) {
+            let global = world
+                .get::<GlobalTransform>(paint.entity)
+                .map_or(Affine3A::IDENTITY, |g| g.0);
+            let origin = Vec3::from(global.translation);
+            let view = ViewProj::new(&self.orbit, rect);
+            if let Some(hit) = crate::gizmo::hit_plane(view.ray(Vec2::new(x, y)), origin, Vec3::Z) {
+                let scale = Vec2::new(
+                    Vec3::from(global.matrix3.x_axis).length(),
+                    Vec3::from(global.matrix3.y_axis).length(),
+                );
+                paint.hovered = Some(cell_at((hit - origin).truncate(), paint.cell * scale));
+            }
+        }
+        if over {
+            if self.input.pressed(Button::Left) && self.input.ctrl() {
+                if let Some((cx, cy)) = paint.hovered {
+                    let value = world
+                        .get::<engine_app::TileMap>(paint.entity)
+                        .and_then(|m| m.get(cx, cy))
+                        .map(str::to_owned);
+                    match value {
+                        Some(v) => {
+                            self.say(format!("Brush: {v}"));
+                            self.tile_brush = Some(v);
+                        }
+                        None => self.say(String::from("An empty cell: the brush stays")),
+                    }
+                }
+            } else if paint.stroke.is_none()
+                && (self.input.pressed(Button::Left) || self.input.pressed(Button::Right))
+            {
+                let erase = !self.input.pressed(Button::Left);
+                if !erase && self.tile_brush.is_none() {
+                    self.say(String::from(
+                        "Pick a brush first: Ctrl+click a cell, or Tiles: Pick Brush…",
+                    ));
+                } else if let Some(cell) = paint.hovered {
+                    self.history
+                        .begin(if erase { "Erase Tiles" } else { "Paint Tiles" }, None);
+                    self.history.touch(world, paint.entity);
+                    paint.stroke = Some(Stroke { erase, last: cell });
+                    self.paint_cells(world, paint.entity, &[cell], erase);
+                }
+            }
+            self.input.consume_press(Button::Left);
+            self.input.consume_press(Button::Right);
+        }
+        if let Some(mut stroke) = paint.stroke {
+            let button = if stroke.erase {
+                Button::Right
+            } else {
+                Button::Left
+            };
+            if self.input.held(button) {
+                if let Some(cell) = paint.hovered
+                    && cell != stroke.last
+                {
+                    let cells = line(stroke.last, cell);
+                    self.paint_cells(world, paint.entity, &cells[1..], stroke.erase);
+                    stroke.last = cell;
+                }
+                paint.stroke = Some(stroke);
+            } else {
+                paint.stroke = None;
+                if let Some(map) = world.get_mut::<engine_app::TileMap>(paint.entity) {
+                    map.tidy();
+                }
+                self.history.commit(world);
+            }
+        }
+        self.tile_paint = Some(paint);
+    }
+
+    /// Cells `cells` of tile map `e` given the brush, or emptied when `erase`.
+    fn paint_cells(&mut self, world: &mut World, e: Entity, cells: &[(i32, i32)], erase: bool) {
+        let brush = if erase { None } else { self.tile_brush.clone() };
+        if let Some(map) = world.get_mut::<engine_app::TileMap>(e) {
+            for &(x, y) in cells {
+                if map.get(x, y) != brush.as_deref() {
+                    map.set(x, y, brush.as_deref());
+                }
+            }
+        }
+    }
+
+    /// "Tiles: Pick Brush…" (E13-3c): every tile of the selected (or painted) map's tile
+    /// set in the palette, by source and cell.
+    fn pick_tile_brush(&mut self, world: &mut World) {
+        let map = self.tile_paint.as_ref().map(|p| p.entity).or_else(|| {
+            self.selection
+                .last()
+                .copied()
+                .filter(|&e| world.get::<engine_app::TileMap>(e).is_some())
+        });
+        let Some(set) = map.and_then(|e| self.tile_set_of(world, e)) else {
+            self.say(String::from(
+                "Select a tile map with a tile set to pick its tiles",
+            ));
+            return;
+        };
+        let mut items = Vec::new();
+        for (key, source) in &set.sources {
+            let Some(path) = self.asset_db.get(source.image.file).map(|e| e.path.clone()) else {
+                continue;
+            };
+            let Some(image) = std::fs::read(self.root.join(&path))
+                .ok()
+                .and_then(|b| engine_assets::decode_image(&b).ok())
+            else {
+                continue;
+            };
+            let [tw, th] = set.tile.map(|v| v.max(1));
+            let across = |size: u32, margin: u32, gap: u32, tile: u32| {
+                (size.saturating_sub(margin) + gap) / (tile + gap)
+            };
+            let columns = across(image.width, source.margin[0], source.gap[0], tw);
+            let rows = across(image.height, source.margin[1], source.gap[1], th);
+            for row in 0..rows {
+                for column in 0..columns {
+                    let value = format!("{key}:{column},{row}");
+                    items.push(Choice {
+                        label: value.clone(),
+                        detail: path.clone(),
+                        pick: Pick::TileBrush(value),
+                    });
+                }
+            }
+        }
+        if items.is_empty() {
+            self.say(String::from("The tile set's images have no whole tiles"));
+            return;
+        }
+        self.open_list(world, "The brush: a tile of the tile set", items);
+    }
+
+    /// "Image: New Tile Set…" (E13-3c): cell sizes in the palette for a tile set of the
+    /// image picked in the dock.
+    fn pick_new_tile_set(&mut self, world: &mut World) {
+        if self.inspected_image().is_none() {
+            self.say(String::from(
+                "Pick an image in the FileSystem dock to make a tile set of it",
+            ));
+            return;
+        }
+        let items = SLICE_CELLS
+            .iter()
+            .map(|&cell| Choice {
+                label: format!("{cell} × {cell} pixel tiles"),
+                detail: String::new(),
+                pick: Pick::NewTileSet(cell),
+            })
+            .collect();
+        self.open_list(world, "The tile set's tile size", items);
+    }
+
+    /// A tile set beside the inspected image (`forest.png` → `forest.tileset`), its one
+    /// source that image, tiles `cell` pixels square, as many pixels a metre as the image's
+    /// sprite settings say.
+    fn new_tile_set(&mut self, cell: u32) {
+        let Some((image, path)) = self.inspected_image() else {
+            return;
+        };
+        let (folder, stem) = match path.rsplit_once('/') {
+            Some((folder, file)) => (folder.to_owned(), file),
+            None => (String::new(), path.as_str()),
+        };
+        let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s).to_owned();
+        let meta = AssetMeta::read(&self.root.join(&path));
+        let mut set = engine_scene::TileSetFile {
+            tile: [cell, cell],
+            pixels_per_unit: meta.sprite.applied_pixels_per_unit(),
+            ..engine_scene::TileSetFile::default()
+        };
+        set.sources.insert(
+            String::from("k0"),
+            engine_scene::TileSource {
+                image: AssetRef::file(image),
+                ..engine_scene::TileSource::default()
+            },
+        );
+        let file = unique_file(
+            &self.root,
+            &folder,
+            &stem,
+            engine_scene::TileSetFile::EXTENSION,
+        );
+        let id = AssetId::new();
+        let text = set.to_text(id);
+        match self.write_own_file(&file, id, &text) {
+            Ok(()) => self.say(format!(
+                "{file}: tiles of {cell} pixels from {path}; drop it into a 2D view to paint a map"
+            )),
+            Err(why) => self.say(format!("{file} could not be written: {why}")),
+        }
+    }
+
+    /// A tile map of the dropped tile set (E13-3c), at the scene's origin's cell grid (a
+    /// new root), selected; Tab paints it.
+    fn add_tile_map(&mut self, world: &mut World, drag: &AssetDrag) {
+        let stem = drag
+            .name
+            .rsplit_once('.')
+            .map_or(drag.name.as_str(), |(stem, _)| stem);
+        let name = self.sibling_name(world, None, stem, None);
+        let order = self.last_root_order(world);
+        self.history.begin(&format!("Add {}", drag.name), None);
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(&name),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            RootOrder(order),
+            engine_app::TileMap::new(AssetRef::file(drag.asset)),
+        ));
+        self.history.touch_new(world, e);
+        self.history.commit(world);
+        self.show(world, e);
+        self.say(format!(
+            "{name}: a tile map of {}; Tab paints it",
+            drag.name
+        ));
     }
 
     /// Tab's joint mode's frame (ADR 0124's E12-1c): the character's joint nearest the
@@ -20074,6 +20412,12 @@ impl Editor {
             self.toggle_face_edit(world);
         } else if id == ids.edit_joints {
             self.toggle_joint_edit();
+        } else if id == ids.paint_tiles {
+            self.toggle_tile_paint(world);
+        } else if id == ids.tile_brush {
+            self.pick_tile_brush(world);
+        } else if id == ids.new_tile_set {
+            self.pick_new_tile_set(world);
         } else if id == ids.export {
             match self.brush_group(world) {
                 Some(group) => self.export_group = Some(group),
@@ -26412,6 +26756,7 @@ impl Editor {
             (DropTarget::View, K::Texture) if self.orbit.flat.is_some() => {
                 self.add_sprite(world, &drag);
             }
+            (DropTarget::View | DropTarget::Tree, K::TileSet) => self.add_tile_map(world, &drag),
             (DropTarget::Tree, K::Sound) => self.add_sound(world, &drag, None),
             (DropTarget::Field(section, field), _) => {
                 self.drop_on_field(world, section, field, &mut drag);
@@ -35453,6 +35798,93 @@ mod tests {
         assert_eq!(ed.history.steps().count(), 3);
         ed.run(&mut world, undo);
         assert!(slices(&dir).iter().all(|s| s.pivot == [0.5, 0.5]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tile maps in the editor (ADR 0125's E13-3c): a tile set made from an image, a map
+    /// of it dropped into the tree, Tab paints it; a stroke is one undo step, its cells
+    /// on the line it crossed, the eraser one too.
+    #[test]
+    fn a_tile_set_from_an_image_makes_a_map_painted_in_strokes() {
+        let (dir, mut world, mut ed, _) = drop_project("tile-paint");
+        let png = engine_render::png::encode_png(
+            32,
+            16,
+            engine_render::png::PngFormat::Rgba,
+            &[200u8; 32 * 16 * 4],
+        )
+        .unwrap();
+        std::fs::write(dir.join("props/forest.png"), png).unwrap();
+        ed.open_assets();
+        let image = ed.asset_db.find("props/forest.png").expect("found").id;
+        ed.reveal_asset(image);
+        ed.new_tile_set(16);
+        let set = engine_scene::TileSetFile::load(&dir.join("props/forest.tileset")).unwrap();
+        assert_eq!(set.tile, [16, 16]);
+        assert_eq!(set.sources["k0"].image.file, image);
+        // Dropped into the tree: a map of it, selected.
+        let id = ed.asset_db.find("props/forest.tileset").expect("found").id;
+        ed.drop_asset(
+            &mut world,
+            AssetDrag {
+                asset: id,
+                kind: engine_scene::AssetKind::TileSet,
+                path: String::from("props/forest.tileset"),
+                name: String::from("forest.tileset"),
+                plan: None,
+                refused: None,
+                placed: None,
+                selection: Vec::new(),
+                over: DropTarget::Tree,
+                point: None,
+                tried: None,
+            },
+        );
+        let map = ed.active().expect("the map");
+        assert_eq!(
+            world.get::<engine_app::TileMap>(map).unwrap().tile_set.file,
+            id
+        );
+        // Tab paints it: cells a metre square (16 pixels at 16 a metre).
+        let tab = ed.ids.paint_tiles;
+        ed.run(&mut world, tab);
+        let paint = ed.tile_paint.clone().expect("painting");
+        assert_eq!(paint.cell, Vec2::ONE);
+        // A stroke from (0, 0) to (3, 1): one step, every cell of its line painted.
+        ed.tile_brush = Some(String::from("k0:1,0"));
+        ed.history.begin("Paint Tiles", None);
+        ed.history.touch(&mut world, map);
+        let cells = crate::tiles::line((0, 0), (3, 1));
+        ed.paint_cells(&mut world, map, &cells, false);
+        ed.history.commit(&mut world);
+        let tiles = world.get::<engine_app::TileMap>(map).unwrap();
+        for &(x, y) in &cells {
+            assert_eq!(tiles.get(x, y), Some("k0:1,0"), "({x}, {y})");
+        }
+        assert_eq!(tiles.get(0, 1), None);
+        // Erased in a stroke of its own, then both taken back.
+        ed.history.begin("Erase Tiles", None);
+        ed.history.touch(&mut world, map);
+        ed.paint_cells(&mut world, map, &[(0, 0)], true);
+        ed.history.commit(&mut world);
+        assert_eq!(
+            world.get::<engine_app::TileMap>(map).unwrap().get(0, 0),
+            None
+        );
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(
+            world.get::<engine_app::TileMap>(map).unwrap().get(0, 0),
+            Some("k0:1,0")
+        );
+        ed.run(&mut world, undo);
+        assert_eq!(
+            world.get::<engine_app::TileMap>(map).unwrap().get(1, 0),
+            None
+        );
+        // Tab again leaves.
+        ed.run(&mut world, tab);
+        assert!(ed.tile_paint.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
