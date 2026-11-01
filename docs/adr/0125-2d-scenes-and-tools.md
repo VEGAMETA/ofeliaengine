@@ -952,3 +952,20 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c-5 and later):** clips' renaming and their list with a preview, pivots
   dragged, nine-slice borders; graphs of sprite clips; Aseprite files; sliced and tiled
   modes; renames followed in scenes not open.
+
+## As built (E13-2c-5, 2026-11-01): the image's clips in its tab
+
+- **Chips** under the tab's bar, one a clip (`sheet::clip_label`: name, frames, frame
+  time, mode); a click chooses one (again, or Escape, lets go). The chosen clip's frames
+  are outlined in green and it plays in the canvas's top right corner at a whole zoom
+  (`sheet::clip_frame`: the run, backwards, ping-pong's way back, durations, once held at
+  its end, as the player's `SpriteClip` lays it out), timed from when it was chosen.
+- With a clip chosen, **F2** renames it (a name another clip has refused) and **Delete**
+  takes it away instead of the picked slices; each one undo step. Animators naming a
+  renamed clip by its old name play the image's first clip until changed.
+- Tests: the preview's frames (ping-pong with a long first frame, a backwards once held
+  at its end) and the chip's label; the editor listing a made clip, F2 renaming it,
+  Delete taking the clip and not the slices, undone.
+- **Left (E13-2c-6 and later):** a clip's frame time, mode and frames edited in the tab,
+  pivots dragged, nine-slice borders; graphs of sprite clips; Aseprite files; sliced and
+  tiled modes; renames followed in scenes not open.
