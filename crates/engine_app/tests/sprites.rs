@@ -11,7 +11,7 @@ use engine_app::{
 use engine_core::math::{Vec2, Vec3};
 use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, bytemuck, pod_component};
 use engine_runtime::Camera;
-use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, SpriteImport};
+use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, SliceImport, SpriteImport};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -203,6 +203,79 @@ fn a_2d_view_shows_sprites_exactly_as_painted() {
         assert!(passes.contains(&"2d"), "{passes:?}");
         assert!(!passes.contains(&"forward"), "{passes:?}");
     }
+    assert_valid(&player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sheet cut into slices (ADR 0125's E13-2): a sprite shows a slice by its frame number
+/// or by the slice's name as a part of the image, each at the slice's own size and pivot.
+#[test]
+fn a_sheets_slices_are_drawn_by_frame_and_by_name() {
+    // 32 × 16: red on the left 16 pixels, green on the right.
+    let sheet = image(32, 16, |x, _| {
+        if x < 16 {
+            [255, 0, 0, 255]
+        } else {
+            [0, 255, 0, 255]
+        }
+    });
+    let slice = |name: &str, x: u32, pivot: [f32; 2]| SliceImport {
+        name: String::from(name),
+        rect: [x, 0, 16, 16],
+        pivot,
+        ..SliceImport::default()
+    };
+    let import = SpriteImport {
+        // The second stands on its feet.
+        slices: vec![slice("red", 0, [0.5, 0.5]), slice("green", 16, [0.5, 0.0])],
+        ..SpriteImport::default()
+    };
+    let (dir, paths, ids) = project("slices", &[("sheet.png", sheet, import)]);
+    let Some(mut player) = player(&dir, &paths) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let world = player.world_mut();
+    camera(world);
+    let mut at_x = |x: f32, sprite: Sprite| {
+        world.spawn((
+            Transform::from_xyz(x, 0.0, 0.0),
+            GlobalTransform::IDENTITY,
+            sprite,
+        ))
+    };
+    // Frame 0 (red, centred), frame 1 (green, on its feet), a frame past the last (green
+    // again), and the red slice by name.
+    let whole = Sprite::new(AssetRef::file(ids[0]));
+    at_x(-4.0, whole);
+    at_x(-2.0, Sprite { frame: 1, ..whole });
+    at_x(0.0, Sprite { frame: 9, ..whole });
+    let named = at_x(2.0, Sprite::new(AssetRef::part(ids[0], "red")));
+    let mut game = Slides(None);
+    let rgba = capture_with(&mut player, &mut game, 4);
+    let (red, green) = ([255, 0, 0, 255], [0, 255, 0, 255]);
+    let background = at(&rgba, -6.0, 3.0);
+    // A metre square each: red about its middle; green above its feet.
+    assert_eq!(at(&rgba, -4.4, -0.4), red, "frame 0");
+    assert_eq!(
+        at(&rgba, -4.4, 0.6),
+        background,
+        "frame 0 is one metre high"
+    );
+    assert_eq!(at(&rgba, -2.4, 0.9), green, "frame 1, on its feet");
+    assert_eq!(
+        at(&rgba, -2.4, -0.1),
+        background,
+        "frame 1, nothing below its feet"
+    );
+    assert_eq!(at(&rgba, 0.4, 0.5), green, "past the last: the last");
+    assert_eq!(at(&rgba, 2.4, 0.4), red, "by name");
+    assert_eq!(at(&rgba, 2.6, 0.0), background, "by name: one metre wide");
+    // Picking agrees.
+    assert_eq!(
+        player.sprite_at(Vec2::new(2.3, 0.3), |_, _| true),
+        Some(named)
+    );
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
 }

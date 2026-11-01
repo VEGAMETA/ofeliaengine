@@ -393,7 +393,7 @@ impl Sprites {
                 return;
             }
             let slot = assets.sprite_slot(sprite.image);
-            let Some(image) = assets.sprite_image(slot) else {
+            let Some(image) = assets.sprite_frame(slot, sprite.frame) else {
                 return;
             };
             let pose = pose_of(&global.0);
@@ -432,7 +432,7 @@ impl Sprites {
             return None;
         }
         let slot = assets.sprite_slot(sprite.image);
-        let image = assets.sprite_image(slot)?;
+        let image = assets.sprite_frame(slot, sprite.frame)?;
         let (center, ax, ay) = placed(sprite, &image, &pose_of(&global.0));
         let (hx, hy) = (ax * 0.5, ay * 0.5);
         Some([
@@ -550,7 +550,7 @@ impl Sprites {
                     entry.image = sprite.image;
                     entry.slot = assets.sprite_slot(sprite.image);
                 }
-                let Some(image) = assets.sprite_image(entry.slot) else {
+                let Some(image) = assets.sprite_frame(entry.slot, sprite.frame) else {
                     continue;
                 };
                 // Not placed by a tick yet (its world transform may not be propagated).
@@ -646,10 +646,13 @@ fn covers(sprite: &Sprite, image: &SpriteImage, pose: &Pose, point: Vec2) -> Opt
         return None;
     }
     let (u, v) = (a + 0.5, 0.5 - b);
-    Some(Vec2::new(
+    let (u, v) = (
         if sprite.flip_x != 0 { 1.0 - u } else { u },
         if sprite.flip_y != 0 { 1.0 - v } else { v },
-    ))
+    );
+    // Within the image: the frame's part of it.
+    let [u0, v0, u1, v1] = image.uv;
+    Some(Vec2::new(u0 + u * (u1 - u0), v0 + v * (v1 - v0)))
 }
 
 /// Where `sprite` of `image` lies at `pose`: its centre and its two sides (the image's
@@ -723,15 +726,17 @@ fn quad(sprite: &Sprite, image: &SpriteImage, pose: &Pose, view: Option<ViewRect
             return None;
         }
     }
+    // The frame's part of the texture (E13-2), turned round by the flips.
+    let [a0, b0, a1, b1] = image.uv;
     let (u0, u1) = if sprite.flip_x != 0 {
-        (1.0, 0.0)
+        (a1, a0)
     } else {
-        (0.0, 1.0)
+        (a0, a1)
     };
     let (v0, v1) = if sprite.flip_y != 0 {
-        (1.0, 0.0)
+        (b1, b0)
     } else {
-        (0.0, 1.0)
+        (b0, b1)
     };
     Some(Quad {
         transform: Affine2 {
@@ -760,10 +765,43 @@ mod tests {
             pixels_per_unit: 16.0,
             pivot,
             sampler: SamplerKind::NearestClamp,
+            uv: SpriteImage::ALL,
         }
     }
 
     const STILL: Pose = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+    /// A frame of a sheet (E13-2): its own size and pivot, its part of the texture, and
+    /// picking's coordinates inside that part; flips turn the part round.
+    #[test]
+    fn a_frame_draws_its_part_of_the_sheet() {
+        // A 64 × 16 sheet of four 16 × 16 frames; the third, standing on its feet.
+        let sheet = image(64.0, 16.0, Vec2::splat(0.5));
+        let frame = crate::assets::SpriteFrame {
+            rect: [32.0, 0.0, 16.0, 16.0],
+            pivot: Vec2::new(0.5, 0.0),
+        };
+        let third = sheet.framed(&frame);
+        assert_eq!(third.size, Vec2::splat(16.0));
+        assert_eq!(third.uv, [0.5, 0.0, 0.75, 1.0]);
+        let sprite = Sprite::new(AssetRef::NONE);
+        let q = quad(&sprite, &third, &STILL, None).unwrap();
+        assert_eq!(q.uv, [0.5, 0.0, 0.75, 1.0]);
+        // One metre square, its feet at the origin: centre half a metre up.
+        assert_eq!(q.transform.translation, Vec2::new(0.0, 0.5));
+        let mut flipped = sprite;
+        flipped.flip_x = 1;
+        assert_eq!(
+            quad(&flipped, &third, &STILL, None).unwrap().uv,
+            [0.75, 0.0, 0.5, 1.0]
+        );
+        // Its top right corner's pixel, in the sheet's coordinates.
+        let uv = covers(&sprite, &third, &STILL, Vec2::new(0.45, 0.95)).unwrap();
+        assert!(
+            (uv - Vec2::new(0.7375, 0.05)).abs().max_element() < 1e-5,
+            "{uv}"
+        );
+    }
 
     /// A sprite's rectangle as picking sees it: around its pivot, turned with it.
     #[test]

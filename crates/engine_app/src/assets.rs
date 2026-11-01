@@ -895,6 +895,9 @@ struct SpriteImageState {
     asset: AssetRef,
     key: TextureKey,
     settings: SpriteImage,
+    /// Its frames (E13-2): its `.meta`'s slices (the one its part names, for a part), in
+    /// pixels; none: the whole image, one frame.
+    frames: Vec<SpriteFrame>,
     /// No path is known for it (said once): never drawn.
     lost: bool,
     /// This frame's: its settings with its texture's bindless index and size, once made.
@@ -910,6 +913,35 @@ pub(crate) struct SpriteImage {
     pub(crate) pixels_per_unit: f32,
     pub(crate) pivot: Vec2,
     pub(crate) sampler: SamplerKind,
+    /// The part of the texture drawn: min u, min v, max u, max v (the image's top at v 0);
+    /// a frame's slice (E13-2), else all of it.
+    pub(crate) uv: [f32; 4],
+}
+
+/// A frame of a sprite image (ADR 0125's E13-2): a slice's rectangle in pixels (left, top,
+/// width, height) and its pivot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SpriteFrame {
+    pub(crate) rect: [f32; 4],
+    pub(crate) pivot: Vec2,
+}
+
+impl SpriteImage {
+    /// The whole image's texture coordinates.
+    pub(crate) const ALL: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    /// This image as `frame` shows it: its size and pivot the frame's, its texture
+    /// coordinates the frame's rectangle's.
+    pub(crate) fn framed(self, frame: &SpriteFrame) -> Self {
+        let [x, y, w, h] = frame.rect;
+        let full = self.size.max(Vec2::ONE);
+        Self {
+            size: Vec2::new(w, h),
+            pivot: frame.pivot,
+            uv: [x / full.x, y / full.y, (x + w) / full.x, (y + h) / full.y],
+            ..self
+        }
+    }
 }
 
 impl Assets {
@@ -929,11 +961,12 @@ impl Assets {
                 asset.file
             );
         }
-        let settings = self.sprite_settings(asset.file);
+        let (settings, frames) = self.sprite_settings(asset);
         self.sprite_images.push(SpriteImageState {
             asset,
             key: TextureKey::new(asset.file, 0, TextureUsage::Color),
             settings,
+            frames,
             lost,
             shown: None,
         });
@@ -942,15 +975,34 @@ impl Assets {
         slot
     }
 
-    /// Image `file`'s sprite settings from its `.meta` (the defaults without one), with no
-    /// texture yet.
-    fn sprite_settings(&self, file: AssetId) -> SpriteImage {
+    /// Image `asset`'s sprite settings from its file's `.meta` (the defaults without one),
+    /// with no texture yet, and its frames: the slices, or the one slice its part names.
+    fn sprite_settings(&self, asset: AssetRef) -> (SpriteImage, Vec<SpriteFrame>) {
         let meta = self
             .paths
-            .get(AssetRef::file(file))
+            .get(AssetRef::file(asset.file))
             .map(|path| AssetMeta::read(&self.root.join(path)).sprite)
             .unwrap_or_default();
-        SpriteImage {
+        let frame = |s: &engine_scene::SliceImport| SpriteFrame {
+            rect: s.rect.map(|v| v as f32),
+            pivot: Vec2::from_array(s.pivot),
+        };
+        let frames = if asset.part == 0 {
+            meta.slices.iter().map(frame).collect()
+        } else {
+            match meta.slice_of_part(asset.part) {
+                Some(k) => vec![frame(&meta.slices[k])],
+                None => {
+                    log::warn!(
+                        target: "engine_app::assets",
+                        "sprite image {}: no slice of that name in its .meta; drawn whole",
+                        asset.file
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let settings = SpriteImage {
             index: u32::MAX,
             size: Vec2::ZERO,
             pixels_per_unit: meta.applied_pixels_per_unit(),
@@ -959,7 +1011,9 @@ impl Assets {
                 SpriteFilter::Nearest => SamplerKind::NearestClamp,
                 SpriteFilter::Linear => SamplerKind::LinearClamp,
             },
-        }
+            uv: SpriteImage::ALL,
+        };
+        (settings, frames)
     }
 
     /// Gives the loader sprite image `slot`'s texture, unless it is made or being made.
@@ -1003,10 +1057,17 @@ impl Assets {
         }
     }
 
-    /// Sprite image `slot` as this frame draws it ([`Self::show_sprite_images`]): `None`
-    /// while its texture is being made, or when it cannot be.
-    pub(crate) fn sprite_image(&self, slot: u32) -> Option<SpriteImage> {
-        self.sprite_images.get(slot as usize)?.shown
+    /// Sprite image `slot`'s frame `frame` as this frame draws it (ADR 0125's E13-2,
+    /// [`Self::show_sprite_images`]): its slice of that number (the last for a number past
+    /// them), or the whole image when it has none; `None` while its texture is being made,
+    /// or when it cannot be.
+    pub(crate) fn sprite_frame(&self, slot: u32, frame: u32) -> Option<SpriteImage> {
+        let state = self.sprite_images.get(slot as usize)?;
+        let image = state.shown?;
+        Some(match state.frames.len() {
+            0 => image,
+            n => image.framed(&state.frames[(frame as usize).min(n - 1)]),
+        })
     }
 
     /// Sprite images known, and of those made.
@@ -1661,7 +1722,10 @@ impl Assets {
         // Its sprites' images: their settings read again, their textures made again.
         for slot in 0..self.sprite_images.len() {
             if self.sprite_images[slot].asset.file == file {
-                self.sprite_images[slot].settings = self.sprite_settings(file);
+                let asset = self.sprite_images[slot].asset;
+                let (settings, frames) = self.sprite_settings(asset);
+                self.sprite_images[slot].settings = settings;
+                self.sprite_images[slot].frames = frames;
                 self.load_sprite_image(slot);
             }
         }

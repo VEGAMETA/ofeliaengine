@@ -816,5 +816,28 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   of `Perspective`. Tests: an editor on a player with a 2D scene, a click through a
   clear half to the sprite behind and on an opaque half, the active outline's lines.
 - **Left (E13-1b-8 and later):** Ctrl snapping to a tile map's cells (with E13-3); the
-  2D gizmo's own look. A slice (E13-2) will pass its rectangle of the image to the
-  same picking test.
+  2D gizmo's own look.
+
+## As built (E13-2a, 2026-11-01): slices
+
+- **`SpriteImport.slices`** (`SliceImport`: `name`, `rect` in pixels from the top left,
+  `pivot`, nine-slice `border`) as lines of the image's `.meta` sprite section
+  (`sprite.slices.0.rect = [0, 0, 16, 32]`); `SpriteImport::slice_of_part` finds one by a
+  part's hash.
+- **Frames:** an image with slices has them as its frames, in order; `Sprite.frame`
+  numbers one (0 the first, a number past the last clamps to the last, so a flipbook
+  never draws nothing); an image without slices is one frame, all of it. A sprite whose
+  `image` is a part (`hero.png#run_1`) shows that slice alone (a name the `.meta` lacks
+  draws the whole image and says so once).
+- **The player:** `Assets::sprite_frame(slot, frame)` gives the image as the frame draws
+  it (`SpriteImage::framed`: the slice's size and pivot, its texture coordinates in
+  `SpriteImage::uv`); drawing, picking (the opaque test gets the sheet's coordinates, so
+  E13-1b-6's masks apply unchanged) and outlines use it. Slices are read again when the
+  `.meta` changes, as the rest of the section is. Nothing is added a frame: a slot's
+  frames are made with it.
+- Tests: the `.meta` lines round trip and a part finds its slice; a frame's size, pivot,
+  coordinates and flips (unit); on both GPUs' test a sheet's frames by number, past the
+  last, and by name, drawn at their own size and pivot, and picked.
+- **Left (E13-2b and later):** the image's tab (grid, islands and hand slicing, names,
+  pivots, borders, re-slicing that keeps names); clips in the `.meta` played by the
+  `Animator`; Aseprite files; sliced and tiled modes.
