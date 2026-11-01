@@ -1088,3 +1088,49 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   - padding between cells for linear filtering;
   - tag user data and layer names (for example, a layer per sprite part);
   - a despawned sprite's graph state let go.
+
+## As built (E13-3a, 2026-11-01): tile sets and tile maps as data
+
+- **`.tileset`** (`engine_scene::TileSetFile`, `AssetKind::TileSet`) is one value in the
+  scenes' grammar, with the fields this ADR's sketch names:
+  - `grid` (`Square` only, question 8: a), `tile`, `pixels_per_unit`;
+  - `sources` by short id (image, margin, gap);
+  - `terrains` by name (mode, colour; always written whole);
+  - `tiles` by `source:column,row`: shapes (polygons as lists of numbers,
+    `shapes.0 = [...]`), surface, one-way, terrain marks, frames with frame time and
+    phases, weight, data.
+  - Lines at their defaults are left out, so a plain tile has none. Enums are written as
+    their names (`mode = Blob`), not the sketch's quoted strings.
+  - `TileName` reads and writes `k2:4,3`; `tile_rect` gives a tile's rectangle in its
+    source.
+- **`TileMap`** (`engine_app::tilemap`, a reflected component) holds:
+  - `tile_set`;
+  - `palette` (key to value);
+  - `cells: BTreeMap<String, BTreeMap<u32, String>>`, written exactly as the sketch:
+    `TileMap.cells["0,0"][14] = ". . a3kq*12 x0d4"`;
+  - `color`, `layer`, `order`, `hidden`.
+
+  It works like this:
+  - A cell's value is a tile and its orientation words (`flip_x flip_y transpose`;
+    bits 1, 2, 4 in `parse_cell`).
+  - A palette key is the first four base-36 digits of the value's `state_hash64`. It is
+    lengthened only when that key is taken, so two maps (or branches) give the same tile
+    the same key.
+  - Rows: `.` is an empty cell, runs of three or more are written `key*n`, and trailing
+    empties are dropped. Empty rows and chunks are removed as they empty.
+  - `get`, `set`, `for_each`, and `tidy` (drops unused keys).
+- **Measured (2026-11-01, ref-1, test profile):** one 256 × 256 layer as text:
+
+  | Layer | Text | Write | Read | Decode cells |
+  |---|---|---|---|---|
+  | Every cell one of 16 tiles at random (worst case) | 359 KB, 2,071 lines | 1.2 ms | 1.4 ms | 2.5 ms |
+  | A level: ground rows with a sixteenth varied, a wall row, sky | 40 KB, 821 lines | 0.18 ms | 0.37 ms | 0.52 ms |
+
+  The worst case is a little over question 3's estimate (70–320 KB). Reading stays in
+  milliseconds, as estimated.
+- **Tests:** the tile set's text round-trips without its defaults; tile names and
+  rectangles; cells across chunks and negative places with runs; palette keys shared
+  between maps and lengthened when taken; orientation words; a scene round trip; the
+  measurement above.
+- **Left:** drawing (E13-3b: the chunk buffers, the flat-layer quad and its own fragment
+  entry point); the Tiles panel and painting (E13-3c); the tile set's tab.
