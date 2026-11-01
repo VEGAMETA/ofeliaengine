@@ -1264,6 +1264,7 @@ struct CommandIds {
     actual_size: CommandId,
     slice_grid: CommandId,
     slice_islands: CommandId,
+    slice_pivot: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1522,6 +1523,7 @@ fn commands() -> (Commands, CommandIds) {
         actual_size: c.register("view.actual_size", "View", "2D: the Art at 100 %"),
         slice_grid: c.register("image.slice_grid", "Image", "Slice by Grid…"),
         slice_islands: c.register("image.slice_islands", "Image", "Slice by Islands"),
+        slice_pivot: c.register("image.slice_pivot", "Image", "Slice Pivot…"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -2563,6 +2565,8 @@ enum Pick {
     /// Slices the inspected image by a grid of square cells this many pixels a side
     /// (ADR 0125's E13-2c).
     SliceGrid(u32),
+    /// Sets the picked slices' pivot to this preset (E13-2c-3).
+    SlicePivot(usize),
     /// Keeps a change made while playing, or not (E3-3).
     Keep(KeepItem),
     /// Shows this asset in the FileSystem dock.
@@ -9746,6 +9750,7 @@ impl Editor {
                             Pick::Select(e) => self.show(world, e),
                             Pick::Step(k, value) => self.set_step(world, k, value),
                             Pick::SliceGrid(cell) => self.slice_image(world, Some(cell)),
+                            Pick::SlicePivot(k) => self.set_slice_pivot(world, k),
                             Pick::Keep(item) => self.toggle_keep(world, item),
                             Pick::Reveal(id) => self.reveal_asset(id),
                             Pick::Component { name, .. } => self.add_component(world, &name),
@@ -14614,6 +14619,7 @@ impl Editor {
         let over =
             free && cursor.is_some_and(|[cx, cy]| cx >= x && cy >= y && cx < x + w && cy < y + h);
         let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+        let mut new_slice = None;
         let doc = &mut self.sheets[k];
         if !doc.framed && doc.image.is_some() {
             doc.frame([w, h]);
@@ -14631,8 +14637,42 @@ impl Editor {
             if self.input.pressed(Button::Left) {
                 let hit = doc.slice_at(p);
                 doc.click(hit, shift, ctrl);
+                // On nothing: a rectangle drawn by hand from there (E13-2c-3), or a second
+                // press soon after on the same pixel fits a slice to the drawing.
+                if hit.is_none() && !shift && !ctrl {
+                    let pixel = [p[0].floor() as i64, p[1].floor() as i64];
+                    let now = Instant::now();
+                    let double = doc.last_press.is_some_and(|(at, px)| {
+                        px == pixel && now.duration_since(at).as_secs_f32() < 0.45
+                    });
+                    if double {
+                        doc.last_press = None;
+                        new_slice = Some(SheetSlice::Fit(pixel));
+                    } else {
+                        doc.last_press = Some((now, pixel));
+                        doc.drawing = Some((p, p));
+                    }
+                }
             }
         }
+        if let Some((from, _)) = doc.drawing {
+            if let Some(at) = cursor {
+                doc.drawing = Some((from, doc.image_point(at, [x, y], [w, h])));
+            }
+            if !self.input.held(Button::Left) {
+                let drawn = doc.drawing.take();
+                if let (Some((a, b)), Some((_, size))) = (drawn, doc.image)
+                    && let Some(rect) = crate::sheet::pixel_rect(a, b, size)
+                    && (rect[2] > 1 || rect[3] > 1)
+                {
+                    new_slice = Some(SheetSlice::Rect(rect));
+                }
+            }
+        }
+        if let Some(how) = new_slice {
+            self.add_slice(world, k, how);
+        }
+        let doc = &mut self.sheets[k];
         // Its own keys (F and Delete come through `run`): M a clip, Escape lets go.
         let mut clip = false;
         if free {
@@ -14655,6 +14695,108 @@ impl Editor {
         }
         let doc = &self.sheets[k];
         doc.status(&mut self.sheet_status);
+    }
+
+    /// A slice added to image tab `k`'s image by hand (E13-2c-3): a drawn rectangle, or
+    /// the island of drawn pixels at a pixel (a double click), named after the file with
+    /// the lowest free number, standing on the image's pivot; one undo step, then picked.
+    fn add_slice(&mut self, world: &mut World, k: usize, how: SheetSlice) {
+        let Some(doc) = self.sheets.get_mut(k) else {
+            return;
+        };
+        let rect = match how {
+            SheetSlice::Rect(rect) => rect,
+            SheetSlice::Fit(pixel) => {
+                if doc.pixels.is_none() {
+                    let file = self.root.join(&doc.path);
+                    doc.pixels = std::fs::read(&file)
+                        .ok()
+                        .and_then(|b| engine_assets::decode_image(&b).ok())
+                        .map(|i| ([i.width, i.height], i.rgba));
+                }
+                let Some((size, rgba)) = doc.pixels.as_ref() else {
+                    return;
+                };
+                let (Ok(px), Ok(py)) = (u32::try_from(pixel[0]), u32::try_from(pixel[1])) else {
+                    return;
+                };
+                match engine_assets::slicing::fit_rect(*size, rgba, [px, py]) {
+                    Some(rect) => rect,
+                    None => {
+                        self.say(String::from("Nothing drawn there to fit a slice to"));
+                        return;
+                    }
+                }
+            }
+        };
+        let (id, path) = (doc.id, doc.path.clone());
+        let stem = std::path::Path::new(&path).file_stem().map_or_else(
+            || String::from("slice"),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let mut made = String::new();
+        self.edit_image_meta(world, id, &path, "Add Slice", |meta| {
+            made = crate::sheet::free_name(&stem, &meta.sprite.slices);
+            meta.sprite.slices.push(engine_scene::SliceImport {
+                name: made.clone(),
+                rect,
+                pivot: meta.sprite.pivot,
+                border: [0; 4],
+            });
+        });
+        if let Some(doc) = self.sheets.get_mut(k)
+            && let Some(last) = doc.slices.iter().position(|s| s.name == made)
+        {
+            doc.picked = vec![last];
+            doc.anchor = Some(last);
+        }
+        let [x, y, w, h] = rect;
+        self.say(format!("{path}: {made} at {x}, {y} · {w} × {h}"));
+    }
+
+    /// "Image: Slice Pivot…" (E13-2c-3): the presets in the palette, for the picked slices
+    /// of the image tab shown.
+    fn pick_slice_pivot(&mut self, world: &mut World) {
+        let picked = self
+            .active_sheet
+            .and_then(|k| self.sheets.get(k))
+            .is_some_and(|d| !d.picked.is_empty());
+        if !picked {
+            self.say(String::from(
+                "Pick slices in an image's tab to set their pivot",
+            ));
+            return;
+        }
+        let items = crate::sheet::PIVOTS
+            .iter()
+            .enumerate()
+            .map(|(k, (name, pivot))| Choice {
+                label: String::from(*name),
+                detail: format!("{}, {}", pivot[0], pivot[1]),
+                pick: Pick::SlicePivot(k),
+            })
+            .collect();
+        self.open_list(world, "The slices' pivot", items);
+    }
+
+    /// The picked slices of the image tab shown stand on pivot preset `k`, one undo step.
+    fn set_slice_pivot(&mut self, world: &mut World, k: usize) {
+        let Some((name, pivot)) = crate::sheet::PIVOTS.get(k).copied() else {
+            return;
+        };
+        let Some(doc) = self.active_sheet.and_then(|s| self.sheets.get(s)) else {
+            return;
+        };
+        let picked = doc.picked.clone();
+        let (id, path) = (doc.id, doc.path.clone());
+        self.edit_image_meta(world, id, &path, "Slice Pivot", |meta| {
+            for &s in &picked {
+                if let Some(slice) = meta.sprite.slices.get_mut(s) {
+                    slice.pivot = pivot;
+                }
+            }
+        });
+        self.say(format!("{} slices stand on: {name}", picked.len()));
     }
 
     /// The shown image's picked slices taken out of its `.meta` (Delete in its tab), one
@@ -19702,6 +19844,8 @@ impl Editor {
             self.pick_slice_grid(world);
         } else if id == ids.slice_islands {
             self.slice_image(world, None);
+        } else if id == ids.slice_pivot {
+            self.pick_slice_pivot(world);
         } else if id == ids.actual_size {
             if self.orbit.flat.is_some() {
                 let height = self.view_rect.map_or(720.0, |r| r[3] as f32);
@@ -33514,6 +33658,14 @@ fn record_pso(player: &Player, root: &Path) {
 /// of them is one screen pixel.
 const ART_PIXELS_PER_UNIT: f32 = 16.0;
 
+/// A slice added by hand in an image's tab (E13-2c-3): a drawn rectangle, or fitted to
+/// the drawing at a pixel.
+#[derive(Debug, Clone, Copy)]
+enum SheetSlice {
+    Rect([u32; 4]),
+    Fit([i64; 2]),
+}
+
 /// The cell sizes "Image: Slice by Grid…" offers (E13-2c), in pixels.
 const SLICE_CELLS: [u32; 7] = [8, 16, 24, 32, 48, 64, 128];
 
@@ -34758,6 +34910,54 @@ mod tests {
     /// The 2D view (ADR 0125's E13-1b): an image dropped on it is a sprite of it at the
     /// pointer, its place on whole art pixels, one undo step; View: 2D again is the 3D view
     /// as it was.
+    /// Slices made by hand in an image's tab (E13-2c-3): a drawn rectangle, one fitted to
+    /// the drawing under a pixel, both named after the file and picked; their pivot set
+    /// from a preset; each an undo step.
+    #[test]
+    fn slices_are_drawn_fitted_and_given_pivots_by_hand() {
+        let (dir, mut world, mut ed, _) = drop_project("hand-slices");
+        // 32 × 16: a 5 × 4 drawing at (20, 6), the rest clear.
+        let rgba: Vec<u8> = (0..16u32)
+            .flat_map(|y| (0..32u32).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let on = (20..25).contains(&x) && (6..10).contains(&y);
+                [9, 9, 9, if on { 255 } else { 0 }]
+            })
+            .collect();
+        let png =
+            engine_render::png::encode_png(32, 16, engine_render::png::PngFormat::Rgba, &rgba)
+                .unwrap();
+        std::fs::write(dir.join("props/coin.png"), png).unwrap();
+        ed.open_assets();
+        let id = ed.asset_db.find("props/coin.png").expect("found").id;
+        ed.open_sheet(id, "props/coin.png");
+        ed.add_slice(&mut world, 0, SheetSlice::Rect([0, 0, 8, 8]));
+        ed.add_slice(&mut world, 0, SheetSlice::Fit([22, 7]));
+        let slices =
+            |dir: &std::path::Path| AssetMeta::read(&dir.join("props/coin.png")).sprite.slices;
+        let made = slices(&dir);
+        let rects: Vec<(&str, [u32; 4])> = made.iter().map(|s| (s.name.as_str(), s.rect)).collect();
+        assert_eq!(rects, [("coin_0", [0, 0, 8, 8]), ("coin_1", [20, 6, 5, 4])]);
+        assert_eq!(ed.sheets[0].picked, [1], "the new one picked");
+        // Nothing drawn under a clear pixel: no slice.
+        ed.add_slice(&mut world, 0, SheetSlice::Fit([2, 14]));
+        assert_eq!(slices(&dir).len(), 2);
+        // Both stand on their feet.
+        ed.sheets[0].click(Some(0), false, false);
+        ed.sheets[0].click(Some(1), true, false);
+        let feet = crate::sheet::PIVOTS
+            .iter()
+            .position(|(_, p)| *p == [0.5, 0.0])
+            .unwrap();
+        ed.set_slice_pivot(&mut world, feet);
+        assert!(slices(&dir).iter().all(|s| s.pivot == [0.5, 0.0]));
+        assert_eq!(ed.history.steps().count(), 3);
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert!(slices(&dir).iter().all(|s| s.pivot == [0.5, 0.5]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An image's tab (ADR 0125's E13-2c): opened from the dock, frames picked, M makes a
     /// clip of them, Delete takes slices away (not the scene's entities), each an undo step.
     #[test]

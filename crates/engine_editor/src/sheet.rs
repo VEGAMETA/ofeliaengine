@@ -41,6 +41,58 @@ pub(crate) struct SheetDoc {
     pub(crate) framed: bool,
     /// Its texture as the player has it: the bindless index and the size in pixels.
     pub(crate) image: Option<(u32, [f32; 2])>,
+    /// A rectangle being drawn on the sheet by hand (E13-2c-3): where the press was and
+    /// where the pointer is, in image pixels.
+    pub(crate) drawing: Option<([f32; 2], [f32; 2])>,
+    /// The last press on nothing: when and at which pixel (a second soon after on the
+    /// same pixel fits a slice to the drawing there).
+    pub(crate) last_press: Option<(std::time::Instant, [i64; 2])>,
+    /// Its pixels, read from its file the first time a slice is fitted (RGBA8, rows from
+    /// the top) with its size.
+    pub(crate) pixels: Option<([u32; 2], Vec<u8>)>,
+}
+
+/// The nine pivot presets (E13-2c-3): a name and the pivot (shares of the width and
+/// height from the bottom left).
+pub(crate) const PIVOTS: [(&str, [f32; 2]); 9] = [
+    ("Center", [0.5, 0.5]),
+    ("Bottom Center (feet)", [0.5, 0.0]),
+    ("Top Center", [0.5, 1.0]),
+    ("Left Center", [0.0, 0.5]),
+    ("Right Center", [1.0, 0.5]),
+    ("Bottom Left", [0.0, 0.0]),
+    ("Bottom Right", [1.0, 0.0]),
+    ("Top Left", [0.0, 1.0]),
+    ("Top Right", [1.0, 1.0]),
+];
+
+/// The rectangle of whole pixels between image points `a` and `b` (either corner first),
+/// clamped to an image of `size`; none when it has no area.
+pub(crate) fn pixel_rect(a: [f32; 2], b: [f32; 2], size: [f32; 2]) -> Option<[u32; 4]> {
+    let lo = [
+        a[0].min(b[0]).floor().max(0.0),
+        a[1].min(b[1]).floor().max(0.0),
+    ];
+    let hi = [
+        a[0].max(b[0]).ceil().min(size[0]),
+        a[1].max(b[1]).ceil().min(size[1]),
+    ];
+    (hi[0] > lo[0] && hi[1] > lo[1]).then(|| {
+        [
+            lo[0] as u32,
+            lo[1] as u32,
+            (hi[0] - lo[0]) as u32,
+            (hi[1] - lo[1]) as u32,
+        ]
+    })
+}
+
+/// A slice's name not among `taken`: `{prefix}_{n}` with the lowest free number.
+pub(crate) fn free_name(prefix: &str, taken: &[SliceImport]) -> String {
+    (0..)
+        .map(|n| format!("{prefix}_{n}"))
+        .find(|name| !taken.iter().any(|s| s.name == *name))
+        .unwrap_or_default()
 }
 
 impl SheetDoc {
@@ -58,6 +110,9 @@ impl SheetDoc {
             center: [0.0; 2],
             framed: false,
             image: None,
+            drawing: None,
+            last_press: None,
+            pixels: None,
         };
         doc.read_meta(root);
         doc
@@ -276,6 +331,26 @@ pub(crate) fn draw(
             );
         }
     }
+    // A rectangle being drawn by hand, in the accent colour.
+    if let Some((a, b)) = doc.drawing
+        && let Some([x, y, w, h]) = doc.image.and_then(|(_, size)| pixel_rect(a, b, size))
+    {
+        let [x, y, w, h] = [x, y, w, h].map(|v| v as f32);
+        let (p, q, r, s) = (
+            to([x, y]),
+            to([x + w, y]),
+            to([x + w, y + h]),
+            to([x, y + h]),
+        );
+        let accent = Vec4::from_array(accent);
+        for (from, to) in [(p, q), (q, r), (r, s), (s, p)] {
+            canvas.draw(
+                &Quad::line(from, to, scale.max(1.0))
+                    .color(accent)
+                    .order(order),
+            );
+        }
+    }
     canvas.set_clip(None);
 }
 
@@ -306,7 +381,32 @@ mod tests {
             center: [0.0; 2],
             framed: false,
             image: Some((3, [48.0, 16.0])),
+            drawing: None,
+            last_press: None,
+            pixels: None,
         }
+    }
+
+    /// A rectangle drawn by hand covers whole pixels, either way round, inside the image;
+    /// new names take the free numbers.
+    #[test]
+    fn hand_drawn_rectangles_cover_whole_pixels() {
+        assert_eq!(
+            pixel_rect([3.4, 2.6], [1.2, 7.1], [48.0, 16.0]),
+            Some([1, 2, 3, 6])
+        );
+        assert_eq!(
+            pixel_rect([40.0, 10.0], [60.0, 30.0], [48.0, 16.0]),
+            Some([40, 10, 8, 6])
+        );
+        assert_eq!(pixel_rect([5.0, 5.0], [5.0, 9.0], [48.0, 16.0]), None);
+        let doc = sheet();
+        assert_eq!(free_name("hero", &doc.slices), "hero_0");
+        let taken = [SliceImport {
+            name: String::from("hero_0"),
+            ..SliceImport::default()
+        }];
+        assert_eq!(free_name("hero", &taken), "hero_1");
     }
 
     /// Framed at the largest zoom that fits, centred; points map back to image pixels;
