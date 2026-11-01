@@ -939,7 +939,7 @@ Last updated: 2026-10-28.
   - **E13-1b-1, the editor's 2D view** (#509, ADR 0125's as-built): View: 2D (orthographic
     onto XY, the 3D camera kept), drags pan, the wheel zooms about the pointer by whole
     numbers of the art's pixels, Ctrl+0 is 100 %, F frames in XY.
-  - **S1, the input map in `settings/input.settings`** (#PR, ADR 0127 accepted: team
+  - **S1, the input map in `settings/input.settings`** (#530, ADR 0127 accepted: team
     decision 2026-11-01, all а): bindings as text in `engine_input`, `InputSettings`
     with its map, the player reading the file when the game set no map in code.
   - **E14's project settings: research and ADR 0127** (#508, accepted 2026-11-01):
