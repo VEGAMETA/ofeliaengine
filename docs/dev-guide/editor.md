@@ -1821,7 +1821,9 @@ frame, looping): play it with `Animator::new("clip_0")`. **Delete** takes the pi
 slices away. Drag on the sheet where there is no slice to draw one by hand (whole
 pixels; it is named after the file and picked), or double-click a drawing to fit a slice
 around it. **Image: Slice Pivot…** sets the picked slices' pivot from nine presets (the
-centre, the feet, the corners, the edges' middles). Each is one undo step; Escape lets go
+centre, the feet, the corners, the edges' middles). **F2** renames the picked slice in
+the tab's bar (Enter keeps it, Escape leaves it); sprites of the open scene that name it
+(`hero.png#run_0`) follow the new name in the same undo step. Each is one undo step; Escape lets go
 of the picks, Ctrl+W closes the tab.
 Slice the sheet with **Image: Slice by Grid…** or **Image: Slice by Islands** (see the 2D
 guide).

@@ -3390,6 +3390,8 @@ struct Editor {
     sheet_rect: Option<[u32; 4]>,
     sheet_status: String,
     sheet_labels: Vec<String>,
+    /// The picked slice of the image tab shown is being renamed (F2, E13-2c-4).
+    sheet_renaming: bool,
     /// Where the node search's pick goes: the graph, the canvas point, and the port a link
     /// was drawn from (ADR 0123 E10-3e).
     graph_add: Option<GraphAdd>,
@@ -4657,6 +4659,7 @@ impl Editor {
             sheet_rect: None,
             sheet_status: String::new(),
             sheet_labels: Vec::new(),
+            sheet_renaming: false,
             graph_add: None,
             graph_preview: None,
             preview_texture: None,
@@ -7641,6 +7644,13 @@ impl Editor {
                 .map(|doc| crate::shell::SheetBar {
                     path: &doc.path,
                     status: &self.sheet_status,
+                    renaming: self
+                        .sheet_renaming
+                        .then(|| match doc.picked.as_slice() {
+                            [k] => doc.slices.get(*k).map(|s| s.name.as_str()),
+                            _ => None,
+                        })
+                        .flatten(),
                 }),
             tools: &tools,
             active_tool: self.active_tool,
@@ -8251,6 +8261,14 @@ impl Editor {
             self.close_sheet(k);
         } else if let Some(k) = response.sheet_tab {
             self.show_sheet(k);
+        }
+        // The picked slice renamed in the image tab's bar (F2, E13-2c-4).
+        if let Some(commit) = response.sheet_rename {
+            if commit {
+                let name = self.ui.edited_text().trim().to_owned();
+                self.rename_slice(world, &name);
+            }
+            self.sheet_renaming = false;
         }
         self.find_focus = None;
         self.find_frame(&response);
@@ -14754,6 +14772,72 @@ impl Editor {
         self.say(format!("{path}: {made} at {x}, {y} · {w} × {h}"));
     }
 
+    /// The picked slice of the image tab shown renamed `name` (F2 in its tab, E13-2c-4),
+    /// one undo step; refused when another slice has the name. Scenes naming the old name
+    /// as a part (`hero.png#run_0`) keep pointing at the slot by its old name until changed.
+    fn rename_slice(&mut self, world: &mut World, name: &str) {
+        let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get(k)) else {
+            return;
+        };
+        let [k] = doc.picked.as_slice() else {
+            return;
+        };
+        let k = *k;
+        let Some(old) = doc.slices.get(k).map(|s| s.name.clone()) else {
+            return;
+        };
+        if name.is_empty() || name == old {
+            return;
+        }
+        if name.contains(['#', '/', '"']) {
+            self.say(String::from("A slice's name cannot hold #, / or \""));
+            return;
+        }
+        if doc.slices.iter().any(|s| s.name == name) {
+            self.say(format!("Another slice is named {name}"));
+            return;
+        }
+        let (id, path) = (doc.id, doc.path.clone());
+        let file = self.root.join(&path);
+        let mut meta = AssetMeta::read(&file);
+        let before = meta.to_text(id);
+        let Some(slice) = meta.sprite.slices.get_mut(k) else {
+            return;
+        };
+        slice.name = name.to_owned();
+        let after = meta.to_text(id);
+        if let Err(e) = std::fs::write(AssetMeta::path(&file), &after) {
+            self.say(format!("{path}: not saved ({e})"));
+            return;
+        }
+        // The open scene's sprites naming it by its old name follow it, in the same step.
+        let (from, to) = (
+            engine_scene::AssetRef::part(id, &old),
+            engine_scene::AssetRef::part(id, name),
+        );
+        let mut q = QueryState::<(Entity, &engine_app::Sprite)>::new(world);
+        let using: Vec<Entity> = q
+            .iter_readonly(world)
+            .filter(|(_, s)| s.image == from)
+            .map(|(e, _)| e)
+            .collect();
+        self.history.begin("Rename Slice", None);
+        self.history.change_file(id, &before, &after);
+        for &e in &using {
+            self.history.touch(world, e);
+            if let Some(sprite) = world.get_mut::<engine_app::Sprite>(e) {
+                sprite.image = to;
+            }
+        }
+        self.history.commit(world);
+        self.image_meta_written(id, &meta);
+        let followed = match using.len() {
+            0 => String::new(),
+            n => format!(" ({n} sprites of the scene follow it)"),
+        };
+        self.say(format!("{path}: {old} is now {name}{followed}"));
+    }
+
     /// "Image: Slice Pivot…" (E13-2c-3): the presets in the palette, for the picked slices
     /// of the image tab shown.
     fn pick_slice_pivot(&mut self, world: &mut World) {
@@ -19304,6 +19388,14 @@ impl Editor {
             }
             if id == ids.close_scene {
                 self.close_sheet(k);
+                return;
+            }
+            if id == ids.rename {
+                if self.sheets[k].picked.len() == 1 {
+                    self.sheet_renaming = true;
+                } else {
+                    self.say(String::from("Pick one slice to rename it"));
+                }
                 return;
             }
             if id == ids.duplicate {
@@ -34910,6 +35002,56 @@ mod tests {
     /// The 2D view (ADR 0125's E13-1b): an image dropped on it is a sprite of it at the
     /// pointer, its place on whole art pixels, one undo step; View: 2D again is the 3D view
     /// as it was.
+    /// A slice renamed in its image's tab (F2, E13-2c-4): the `.meta` and the open scene's
+    /// sprites naming it follow, one undo step; a name another slice has is refused.
+    #[test]
+    fn a_slice_is_renamed_and_the_scenes_sprites_follow() {
+        let (dir, mut world, mut ed, _) = drop_project("rename-slice");
+        let png = engine_render::png::encode_png(
+            32,
+            16,
+            engine_render::png::PngFormat::Rgba,
+            &[255u8; 32 * 16 * 4],
+        )
+        .unwrap();
+        std::fs::write(dir.join("props/hero.png"), png).unwrap();
+        ed.open_assets();
+        let id = ed.asset_db.find("props/hero.png").expect("found").id;
+        ed.reveal_asset(id);
+        ed.slice_image(&mut world, Some(16));
+        let old = engine_scene::AssetRef::part(id, "hero_1");
+        let sprite = world.spawn((
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            engine_app::Sprite::new(old),
+        ));
+        ed.open_sheet(id, "props/hero.png");
+        ed.sheets[0].click(Some(1), false, false);
+        // F2 opens the field; a taken name is refused.
+        let rename = ed.ids.rename;
+        ed.run(&mut world, rename);
+        assert!(ed.sheet_renaming);
+        ed.rename_slice(&mut world, "hero_0");
+        assert_eq!(ed.sheets[0].slices[1].name, "hero_1");
+        ed.rename_slice(&mut world, "run");
+        let names: Vec<String> = AssetMeta::read(&dir.join("props/hero.png"))
+            .sprite
+            .slices
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["hero_0", "run"]);
+        assert_eq!(
+            world.get::<engine_app::Sprite>(sprite).unwrap().image,
+            engine_scene::AssetRef::part(id, "run")
+        );
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(world.get::<engine_app::Sprite>(sprite).unwrap().image, old);
+        assert_eq!(ed.sheets[0].slices[1].name, "hero_1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Slices made by hand in an image's tab (E13-2c-3): a drawn rectangle, one fitted to
     /// the drawing under a pixel, both named after the file and picked; their pivot set
     /// from a preset; each an undo step.

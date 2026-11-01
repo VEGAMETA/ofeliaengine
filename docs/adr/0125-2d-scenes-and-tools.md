@@ -935,3 +935,20 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c-4 and later):** renaming slices and clips, pivots dragged, nine-slice
   borders, the clips' list with a preview; graphs of sprite clips; Aseprite files;
   sliced and tiled modes.
+
+## As built (E13-2c-4, 2026-11-01): slices renamed
+
+- **F2** in an image's tab with one slice picked (the `rename` command, taken by the tab
+  while it shows) opens a field in its bar holding the name; Enter renames it, Escape
+  leaves it. A name another slice has, an empty one, or one holding `#`, `/` or `"` is
+  refused with a word on the status line.
+- A part is named by its name's hash, so a rename would leave sprites naming the old
+  name drawing the whole image: the open scene's sprites naming it follow the new name
+  in the same undo step (the `.meta`'s text and their components in one step; undo puts
+  both back). Scenes not open keep the old name until opened and fixed (a later step can
+  look through the project's scenes).
+- Tests: F2 opening the field; a taken name refused; the rename written, a sprite of the
+  scene following it, undone together.
+- **Left (E13-2c-5 and later):** clips' renaming and their list with a preview, pivots
+  dragged, nine-slice borders; graphs of sprite clips; Aseprite files; sliced and tiled
+  modes; renames followed in scenes not open.

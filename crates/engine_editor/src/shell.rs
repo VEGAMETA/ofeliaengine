@@ -1130,6 +1130,8 @@ pub struct SheetBar<'a> {
     pub path: &'a str,
     /// Its size, slices, clips, zoom and what is picked.
     pub status: &'a str,
+    /// The picked slice's name while it is being renamed (F2, E13-2c-4): a field for it.
+    pub renaming: Option<&'a str>,
 }
 
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
@@ -1371,6 +1373,9 @@ pub struct ShellResponse {
     pub close_sheet: Option<usize>,
     /// Id of the sheet's canvas while an image is shown.
     pub sheet_canvas: u64,
+    /// Renaming the picked slice ended: committed (the name is `Ui::edited_text`) or
+    /// cancelled (E13-2c-4).
+    pub sheet_rename: Option<bool>,
     /// Id of its preview's picture (none: 0): presses there are not the canvas's.
     pub graph_preview: u64,
     /// Its bar's Show Slang was clicked (E10-3f-3).
@@ -1870,6 +1875,20 @@ fn center(
         if let Some(sheet) = &model.sheet {
             ui.row("sheet bar", bar(p, 30.0).background(p.dock), |ui| {
                 text(ui, "path", sheet.path, TEXT, p.text_dim);
+                if let Some(name) = sheet.renaming {
+                    let style = Style {
+                        size: [Size::Fixed(180.0), Size::Fixed(22.0)],
+                        padding: [6.0, 0.0, 6.0, 0.0],
+                        radius: 2.0,
+                        background: Some(p.field),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let r = ui.text_field("slice name", name, &field_look(p, style, "", true));
+                    if r.committed || r.cancelled {
+                        out.sheet_rename = Some(r.committed);
+                    }
+                }
                 ui.spacer("fill");
                 text(ui, "status", sheet.status, TEXT, p.text_dim);
             });
