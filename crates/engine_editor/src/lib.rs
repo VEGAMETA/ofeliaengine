@@ -55,6 +55,7 @@ mod sound_view;
 mod sprite_masks;
 mod text_highlight;
 mod thumbnails;
+mod tiles;
 mod transform;
 mod undo;
 

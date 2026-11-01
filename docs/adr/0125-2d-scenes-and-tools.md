@@ -1191,3 +1191,41 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   - a despawned map's cells let go;
   - padding for linear filtering;
   - painting and the Tiles panel (E13-3c).
+
+## As built (E13-3c-1, 2026-11-01): painting tile maps in the editor
+
+- **Image: New Tile Set…** (on the image picked in the dock) offers `SLICE_CELLS` sizes in
+  the palette. It writes `<stem>.tileset` beside the image: one source `k0`, square tiles,
+  and the image's sprite pixels a metre.
+- A `.tileset` dropped into the view or the tree makes a `TileMap` root at the origin,
+  selected, in one undo step (`add_tile_map`).
+- **Tab** over the view, with a tile map selected, paints it (`tiles::TilePaint`, command
+  `tiles.paint`). The frame runs before the camera's and the picking's, so the view's
+  presses are the painting's.
+  - The cell under the pointer comes from the view's ray on the map's plane, at the tile
+    set's tile size over its pixels a metre, times the map's scale.
+  - A left press opens a "Paint Tiles" step and paints the brush; the drag paints every
+    cell of the Bresenham line to the pointer (`tiles::line`). The release tidies the
+    palette and commits the step.
+  - The right button erases the same way ("Erase Tiles").
+  - Ctrl+click picks the cell's value as the brush.
+  - The status bar shows the brush and the hovered cell. Tab or Escape leaves (a stroke
+    under way is kept as its step).
+- **Tiles: Pick Brush…** lists every whole tile of the map's tile set (the sources'
+  images read for their size) as `k0:c,r`. The brush stays between paintings.
+- **Test:** an editor test covers:
+  - a tile set made from an image;
+  - a map dropped into the tree;
+  - Tab, with a metre cell;
+  - a stroke's line painted in one step;
+  - an erase step;
+  - both undone;
+  - Tab leaving.
+- **Left (E13-3c-2 and later):**
+  - the Tiles panel (Alt+T: the set's tiles at any zoom, blocks as stamps);
+  - Shift line and Ctrl+Shift rectangle;
+  - B fill and Shift+B replace;
+  - Z, X turn and C, V flip of the brush;
+  - random and scatter;
+  - the hovered cell drawn in the view;
+  - PageUp and PageDown between layers with the others dimmed.
