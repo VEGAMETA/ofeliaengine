@@ -22,6 +22,7 @@ mod net;
 #[cfg(windows)]
 pub mod platform;
 mod state;
+mod text;
 
 pub use device::{
     EventKind, GAMEPAD_AXIS_COUNT, GAMEPAD_BUTTON_COUNT, GamepadAxis, GamepadButton, InputEvent,

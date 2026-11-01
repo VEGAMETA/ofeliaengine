@@ -99,3 +99,41 @@ fn the_games_ticks_and_frames_see_its_actions() {
     player.frame(&mut game).unwrap();
     assert_eq!(game.held, held, "{game:?}");
 }
+
+/// A game that sets no map in code takes its project's `settings/input.settings` (ADR
+/// 0127's S1): the file's "jump" on Space drives the game's ticks.
+#[test]
+fn the_projects_input_settings_make_the_map() {
+    use engine_app::project_settings::{ActionSettings, InputSettings};
+    let dir = std::env::temp_dir().join(format!("ofelia-input-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("settings")).unwrap();
+    let mut file = InputSettings::default();
+    let mut jump = ActionSettings::default();
+    jump.bindings
+        .insert(String::from("default"), vec![String::from("Space")]);
+    file.actions.insert(String::from("jump"), jump);
+    std::fs::write(
+        dir.join(InputSettings::PATH),
+        file.to_text(engine_scene::AssetId::new()),
+    )
+    .unwrap();
+    let project = dir.clone();
+    let Some((mut player, _)) = common::player_with(move |settings| {
+        settings.window = Window::Offscreen {
+            width: 64,
+            height: 64,
+        };
+        settings.project = Some(project);
+    }) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    player.set_frame_time(Some(1.0 / 64.0));
+    let mut game = Jumps::default();
+    player.frame(&mut game).unwrap();
+    space(&mut player, true);
+    player.frame(&mut game).unwrap();
+    assert_eq!(game.just_pressed, 1, "{game:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

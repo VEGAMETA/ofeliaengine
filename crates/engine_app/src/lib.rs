@@ -76,6 +76,7 @@ mod player;
 pub mod prelude;
 mod previews;
 mod process;
+pub mod project_settings;
 pub mod random;
 mod report;
 mod saves;

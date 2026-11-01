@@ -1046,8 +1046,26 @@ impl Player {
         if settings.audio.enabled {
             startup.notes.push(sound.note().to_owned());
         }
-        // The game's input: its actions a resource of the world.
-        let input = settings.input.as_ref().map(|map| {
+        // The game's input: its actions a resource of the world. A game that sets no map
+        // in code takes its project's `settings/input.settings` (ADR 0127's S1).
+        let from_file = match (&settings.input, &settings.project) {
+            (None, Some(root)) => match crate::project_settings::InputSettings::load(root) {
+                Ok(Some(file)) => {
+                    let (map, problems) = file.to_map();
+                    for p in problems {
+                        log::warn!(target: "engine_app", "settings/input.settings: {p}");
+                    }
+                    Some(map)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!(target: "engine_app", "{e}");
+                    None
+                }
+            },
+            _ => None,
+        };
+        let input = settings.input.as_ref().or(from_file.as_ref()).map(|map| {
             world.insert_resource(engine_input::Input::new(map.clone()));
             PlayerInput::start(offscreen.is_none(), &mut startup.notes)
         });
