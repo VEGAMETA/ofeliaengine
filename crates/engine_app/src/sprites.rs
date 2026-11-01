@@ -347,8 +347,12 @@ pub(crate) struct Sprites {
     drawn: Drawn,
     group_query: Groups,
     new_images: NewImages,
+    /// The tile maps (E13-3b), recorded with the sprites.
+    tiles: crate::tilemap::TileLayers,
     /// What the last frame recorded: sprites drawn and culled.
     pub(crate) recorded: (u32, u32),
+    /// Tile chunks the last frame recorded.
+    pub(crate) tile_chunks: u32,
 }
 
 impl Sprites {
@@ -368,7 +372,9 @@ impl Sprites {
             drawn: QueryState::new(world),
             group_query: QueryState::new(world),
             new_images: QueryState::new(world),
+            tiles: crate::tilemap::TileLayers::new(world),
             recorded: (0, 0),
+            tile_chunks: 0,
         }
     }
 
@@ -519,6 +525,7 @@ impl Sprites {
             sorting,
             drawn,
             group_query,
+            tiles,
             ..
         } = self;
         // The sort groups first: their places, and their sprites marked.
@@ -586,6 +593,14 @@ impl Sprites {
                 });
             }
         });
+        // The tile maps' visible chunks (E13-3b), each in its layer's place.
+        let chunks = tiles.record(
+            world,
+            assets,
+            canvas,
+            |layer, o, y| order(sorting, layer, o, y),
+            view,
+        );
         // The groups' sprites, each group's together in its own order (the canvas keeps
         // the order of equal keys).
         members.sort_unstable_by_key(|m| (m.group, m.order, m.seq));
@@ -597,6 +612,7 @@ impl Sprites {
         }
         canvas.prepare();
         self.recorded = (drawn_count, culled);
+        self.tile_chunks = chunks;
         &self.canvas
     }
 }

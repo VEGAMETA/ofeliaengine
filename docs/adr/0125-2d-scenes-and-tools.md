@@ -1134,3 +1134,60 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
   measurement above.
 - **Left:** drawing (E13-3b: the chunk buffers, the flat-layer quad and its own fragment
   entry point); the Tiles panel and painting (E13-3c); the tile set's tab.
+
+## As built (E13-3b, 2026-11-01): flat tile layers drawn
+
+- **`engine_render2d`:**
+  - `Canvas::tile_table(&[TileEntry]) -> TileTable` records a table of tiles (each tile's
+    bindless image, sampler and region; 32 bytes).
+  - `Canvas::draw_tiles(quad, table, &[u32; 1024])` records a chunk: one quad placed by
+    `quad` (transform, colour, order), with `uv` set to the cell coordinate. Each cell is
+    0 for empty, or its tile plus one (20 bits) with the orientation above it (as in this
+    ADR).
+  - Both go into one `u32` blob per canvas, cleared with it. A chunk's record is the
+    table's signed offset from it, 3 spare words, then the cells.
+- **Staging:**
+  - The blob is staged into the frame's upload ring before the instances.
+  - Each chunk instance carries its record's offset in `texture`. The renderer turns it
+    into the record's address as it copies the instances into the ring: low 32 bits in
+    `texture`, high 16 in the flags' top. So `Push` and `VertexOut` are unchanged.
+  - The chunks on screen are staged every frame rather than kept in a persistent GPU
+    buffer (this ADR's sketch). That costs 4 KB per visible chunk per frame (a few chunks
+    for a pixel-art screen), with no buffer to keep in step with edits.
+- **Batches:** the pipeline now takes 2 bits of a batch's state (premultiplied, multiply,
+  tiles), so the clip index has 14 bits (`MAX_CLIPS` 16,383).
+- **Shader:** `fragmentTiles` is an entry point of its own in `sprite.slang` (a third
+  pipeline). The committed SPIR-V of the other entry points is byte-identical, so sprites
+  pay no register.
+  - It reads the cell, then its tile's entry.
+  - It applies the orientation (transpose, then the flips).
+  - It samples with `SampleGrad`, using the gradients of the continuous cell coordinate
+    scaled to the tile's region, so the mip level does not jump at tile borders.
+  - Empty cells, and tiles whose image is not made yet, are discarded.
+  - The table's offset is added in 64 bits: a pointer plus a negative `int` wrapped as an
+    unsigned 32-bit offset in Slang, which was found by the test.
+- **The player (`engine_app::tilemap::TileLayers`, owned by `Sprites`):**
+  - Each map's cells are read again into chunk arrays and a tile list when `Changed<TileMap>`
+    sees it.
+  - Each frame, every shown map gets its table built from its tile set
+    (`Assets::ensure_tile_set` / `tile_set`; the sources become sprite image slots, so
+    their `.meta` filter applies). `tile_rect` over the shown image's size gives each
+    tile's region.
+  - A map's chunks that overlap the view rectangle are drawn, in the map's layer and order
+    as a sprite's. Cells are tile-sized in metres at the set's pixels per unit, times the
+    entity's scale; its rotation is not applied yet.
+  - The stored chunks are tested one by one, not taken as a range: a map holds tens to
+    hundreds of chunks.
+- **Test:** on both GPUs' test bed, a map from a 2-tile set:
+  - each cell shows its tile's pixels;
+  - a `flip_x` cell is mirrored;
+  - a cell in chunk (−1, −1) is drawn at (−0.5, −0.5);
+  - empty cells stay clear.
+- **Left:**
+  - sorted layers (tiles taller than their cell, y-sorted);
+  - animated tiles (`frames`, `phases`);
+  - a rotated map;
+  - a `.tileset` edited while running (it is read once);
+  - a despawned map's cells let go;
+  - padding for linear filtering;
+  - painting and the Tiles panel (E13-3c).

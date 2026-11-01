@@ -1,6 +1,6 @@
 //! Drawing a [`Canvas`] into a render graph target.
 
-use crate::canvas::{Canvas, Instance, PIPELINE_MULTIPLY};
+use crate::canvas::{Canvas, FLAG_TILES, Instance, PIPELINE_MULTIPLY, PIPELINE_TILES};
 use crate::view::View2d;
 use engine_render::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
 use engine_render::upload::UploadRing;
@@ -15,6 +15,7 @@ const VERTEX_LIST: &[u8] = include_bytes!("../shaders/sprite.vertexList.spv");
 const VERTEX_INSTANCED: &[u8] = include_bytes!("../shaders/sprite.vertexInstanced.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/sprite.fragmentMain.spv");
 const FRAGMENT_DEPTH_TESTED: &[u8] = include_bytes!("../shaders/sprite.fragmentDepthTested.spv");
+const FRAGMENT_TILES: &[u8] = include_bytes!("../shaders/sprite.fragmentTiles.spv");
 
 /// How quads become vertices. [`QuadMode::for_vendor`] picks the fastest measured one for
 /// a GPU vendor (ADR 0015).
@@ -125,9 +126,10 @@ pub struct SceneDepth {
 /// Draws canvases into one color format.
 pub struct Renderer2d {
     /// Indexed by the batch pipeline selector.
-    pipelines: [Pipeline; 2],
-    /// The same, testing against the scene's depth ([`Renderer2d::with_depth_test`]).
-    depth_tested: Option<[Pipeline; 2]>,
+    pipelines: [Pipeline; 3],
+    /// The same, testing against the scene's depth ([`Renderer2d::with_depth_test`]);
+    /// tile chunks are not tested.
+    depth_tested: Option<[Pipeline; 3]>,
     mode: QuadMode,
     index_buffer: vk::Buffer,
     index_allocation: Option<Allocation>,
@@ -211,16 +213,21 @@ impl Renderer2d {
                 },
             )
         };
+        // Tile chunks (ADR 0125's E13-3b): an entry point of their own, so sprites pay no
+        // register for them.
+        let tiles = spirv_words(FRAGMENT_TILES).ok_or_else(invalid)?;
         let pipelines = [
             pipeline(Blend::Premultiplied, &fragment, c"fragmentMain")?,
             pipeline(Blend::Multiply, &fragment, c"fragmentMain")?,
+            pipeline(Blend::Premultiplied, &tiles, c"fragmentTiles")?,
         ];
-        debug_assert_eq!(PIPELINE_MULTIPLY, 1);
+        debug_assert_eq!((PIPELINE_MULTIPLY, PIPELINE_TILES), (1, 2));
         let depth_tested = if depth_test {
             let fragment = spirv_words(FRAGMENT_DEPTH_TESTED).ok_or_else(invalid)?;
             Some([
                 pipeline(Blend::Premultiplied, &fragment, c"fragmentDepthTested")?,
                 pipeline(Blend::Multiply, &fragment, c"fragmentDepthTested")?,
+                pipeline(Blend::Premultiplied, &tiles, c"fragmentTiles")?,
             ])
         } else {
             None
@@ -328,10 +335,33 @@ impl Renderer2d {
             return Err(Render2dError::NotPrepared);
         }
         let count = canvas.len();
-        let needed = (count * (core::mem::size_of::<Instance>() + 4)) as u64;
-        let instances = ring
-            .stage(canvas.instances())
-            .ok_or(Render2dError::RingFull { needed })?;
+        let tile_data = canvas.tile_data();
+        let needed = (count * (core::mem::size_of::<Instance>() + 4) + tile_data.len() * 4) as u64;
+        let instances = if tile_data.is_empty() {
+            ring.stage(canvas.instances())
+                .ok_or(Render2dError::RingFull { needed })?
+        } else {
+            // Tile chunks (E13-3b): their records staged first, the instances copied with
+            // each chunk's record offset made its address.
+            let base = ring
+                .stage(tile_data)
+                .ok_or(Render2dError::RingFull { needed })?
+                .address;
+            let (slots, staged) = ring
+                .alloc::<Instance>(count)
+                .ok_or(Render2dError::RingFull { needed })?;
+            for (slot, instance) in slots.iter_mut().zip(canvas.instances()) {
+                let mut instance = *instance;
+                if instance.flags & FLAG_TILES != 0 {
+                    let address = base + u64::from(instance.texture);
+                    debug_assert!(address >> 48 == 0, "a device address past 48 bits");
+                    instance.texture = address as u32;
+                    instance.flags = FLAG_TILES | (((address >> 32) as u32) << 16);
+                }
+                slot.write(instance);
+            }
+            staged
+        };
         // Quads already in draw order are read directly; otherwise through the order.
         let mut view_flags = if view.y_down { VIEW_Y_DOWN } else { 0 };
         let mut order_address = 0;
