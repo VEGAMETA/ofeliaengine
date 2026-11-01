@@ -1058,10 +1058,18 @@ impl Assets {
     /// Image `asset`'s sprite settings from its file's `.meta` (the defaults without one),
     /// with no texture yet, and its frames: the slices, or the one slice its part names.
     fn sprite_settings(&self, asset: AssetRef) -> (SpriteImage, Vec<SpriteFrame>, Vec<SpriteClip>) {
+        // An Aseprite file's frames, tags and slices with its `.meta`'s (E13-2f).
         let meta = self
             .paths
             .get(AssetRef::file(asset.file))
-            .map(|path| AssetMeta::read(&self.root.join(path)).sprite)
+            .map(|path| {
+                let full = self.root.join(path);
+                let meta = AssetMeta::read(&full).sprite;
+                engine_assets::aseprite::sprite_settings(&full, &meta).unwrap_or_else(|e| {
+                    log::warn!(target: "engine_app::assets", "sprite image {path}: {e}");
+                    meta
+                })
+            })
             .unwrap_or_default();
         let frame = |s: &engine_scene::SliceImport| SpriteFrame {
             rect: s.rect.map(|v| v as f32),

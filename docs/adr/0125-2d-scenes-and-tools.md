@@ -1026,3 +1026,65 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2f and later):** Aseprite files; a clip's frames changed in the tab;
   renames followed in scenes not open; a despawned sprite's graph state let go (kept
   until the entity's index is reused).
+
+## As built (E13-2f, 2026-11-01): Aseprite files
+
+- `engine_assets::aseprite` is our own parser of the published specification
+  (`docs/ase-file-specs.md` at aseprite/aseprite `3669f477`, read 2026-11-01; no code
+  carried over).
+  - **It reads** the header, frames with their durations, and layers with their tree
+    and visibility; reference layers are left out.
+  - **Cels:** raw, linked and zlib-compressed (through the `miniz_oxide` 0.8 that `png`
+    builds, with its features).
+  - **Tilemaps:** tilemap cels and tilesets, with X, Y and diagonal flips.
+  - **Palettes:** the new chunk and both old ones, including the transparent index.
+  - **Also:** tags, slices (nine-slice centre, pivot) and cel user data.
+- **Pixels.** The frames are merged in straight RGBA, in 0..1 floats.
+  - Blend modes: all 19 of the file's. The W3C separable and non-separable formulas,
+    plus addition, subtract and divide.
+  - Opacity: the layer's (when header flag 1 says it is valid) times the cel's.
+  - Groups are merged on their own first when header flag 2 says so.
+  - Z-index reorders cels among their siblings (the specification's NOTE.5 rule).
+- **The sheet.** `decode_image` recognizes the file by its magic number at bytes 4..6
+  and returns its frames as a sheet: a near-square grid of cells, no padding, at most
+  16 384 pixels a side. So the texture loader, the DDC, thumbnails, picking masks and
+  the image tab work unchanged.
+- **The sprite settings.** `aseprite::sprite_settings(path, meta)` merges the file's
+  frames, tags and slices with the `.meta`'s (`Aseprite::sprite`). It reads only the
+  chunks (`read_layout`) and leaves the pixels compressed. The player calls it when it
+  makes a sprite image's slot; the image tab calls it when it reads its slices.
+  - **Frames** become slices `frame_<n>`, each in its cell. The file's slices follow
+    them, keyed at their first frame and placed in that frame's cell.
+  - **Tags** become clips, each with its run of frames and their durations:
+    - Reverse runs backwards (`last` < `first`);
+    - the ping-pong directions become `PingPong`;
+    - a repeat of 1 becomes `Once`;
+    - without tags, one clip `all` holds every frame.
+  - **Events:** a cel's user data lines `event:<name> [data]` become events, at the time
+    their frame first shows in the run.
+  - **Merging with the `.meta`:** a `.meta` slice of the same name gives its pivot and
+    border. A `.meta` clip of the same name adds its events. The `.meta`'s other slices
+    and clips follow.
+- **Editing in the tab.**
+  - Edits run on the merged settings (`edit_image_meta`). The `.meta` keeps only what
+    differs from the file's (`aseprite::overrides`).
+  - An edit whose result does not merge back to what was edited is refused, with a
+    message to change it in Aseprite. That covers a frame's or tag's name, a tag's frames
+    or times, and deleting the file's own.
+  - Slicing by grid or islands, and renaming slices, are refused for Aseprite files.
+- **Builds** copy the file as it is: it is among the binary files, not in the derived
+  pack. The player needs its chunks for the frames, so its pixels are decoded at load.
+- **Tests:**
+  - parser unit tests: blend modes, hidden and reference layers, opacity, indexed
+    palettes, linked cels, tags, slices and events into settings, a file cut at every
+    byte returning an error;
+  - on both GPUs' test bed: a tag played, each frame's colour on screen with its own
+    duration;
+  - an editor test: the tab shows the frames, a pivot is kept alone in the `.meta`, and
+    renames, tag times and grid slicing are refused.
+- **Left (E13-2g and later):**
+  - a clip's frames changed in the tab;
+  - renames followed in scenes that are not open;
+  - padding between cells for linear filtering;
+  - tag user data and layer names (for example, a layer per sprite part);
+  - a despawned sprite's graph state let go.

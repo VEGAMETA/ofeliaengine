@@ -14,6 +14,7 @@
 //! dropped model's entities from ([`GltfOutline`]).
 
 pub mod animation;
+pub mod aseprite;
 pub mod colliders;
 pub mod cook;
 mod ddc;

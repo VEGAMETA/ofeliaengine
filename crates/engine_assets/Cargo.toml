@@ -46,6 +46,9 @@ gltf = { version = "1.4", default-features = false, features = ["utils", "names"
 exr = { version = "=1.74.0", default-features = false }
 # PNG decoding (MIT OR Apache-2.0): image-rs' decoder, the fastest in Rust (ADR 0040).
 png = "0.18"
+# zlib inflation of Aseprite files' cels (MIT OR Zlib OR Apache-2.0; ADR 0125's E13-2f): the
+# copy png already builds, with png's features (no new crate, no feature drift).
+miniz_oxide = { version = "0.8", features = ["simd"] }
 # JPEG decoding (MIT OR Apache-2.0 OR Zlib): as fast as libjpeg-turbo, pure Rust.
 zune-jpeg = { version = "0.5", default-features = false, features = ["std", "x86"] }
 # Material files (ADR 0092): RON text (MIT OR Apache-2.0), the format the owner chose,

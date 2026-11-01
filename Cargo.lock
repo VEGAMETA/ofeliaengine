@@ -321,6 +321,7 @@ dependencies = [
  "exr",
  "gltf",
  "meshopt",
+ "miniz_oxide 0.8.9",
  "png",
  "ron",
  "serde",

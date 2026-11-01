@@ -203,7 +203,12 @@ impl SheetDoc {
     /// Its slices read again from its `.meta` (after an edit, an undo or a change on
     /// disk), the picks kept to those that remain.
     pub(crate) fn read_meta(&mut self, root: &std::path::Path) {
-        let meta = AssetMeta::read(&root.join(&self.path));
+        let path = root.join(&self.path);
+        let mut meta = AssetMeta::read(&path);
+        // An Aseprite file's frames, tags and slices as the player sees them (E13-2f).
+        if let Ok(sprite) = engine_assets::aseprite::sprite_settings(&path, &meta.sprite) {
+            meta.sprite = sprite;
+        }
         self.set_meta(&meta);
     }
 

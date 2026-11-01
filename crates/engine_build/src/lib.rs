@@ -67,9 +67,9 @@ const SOUND_PACK: &str = "sounds.pack";
 const SOUND_LEVEL: i32 = 19;
 
 /// Files never read for the assets they name: they are not text.
-const BINARY: [&str; 16] = [
+const BINARY: [&str; 18] = [
     "png", "jpg", "jpeg", "ktx2", "dds", "bin", "glb", "wav", "ogg", "opus", "flac", "webm", "ttf",
-    "otf", "pack", "exe",
+    "otf", "pack", "exe", "aseprite", "ase",
 ];
 
 /// The largest file read for the assets it names.

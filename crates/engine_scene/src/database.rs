@@ -444,7 +444,9 @@ const KINDS: [(AssetKind, &str, &[&str]); 14] = [
     (
         AssetKind::Texture,
         "texture",
-        &["png", "jpg", "jpeg", "ktx2", "hdr", "exr", "dds"],
+        &[
+            "png", "jpg", "jpeg", "ktx2", "hdr", "exr", "dds", "aseprite", "ase",
+        ],
     ),
     (AssetKind::Sound, "sound", &["wav", "ogg", "opus", "flac"]),
     (AssetKind::Video, "video", &["webm"]),
