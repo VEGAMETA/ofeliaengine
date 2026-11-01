@@ -883,7 +883,7 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
-  - **E13-3c-1, painting tile maps** (#PR): Image: New Tile Set…, a dropped `.tileset`
+  - **E13-3c-1, painting tile maps** (#529): Image: New Tile Set…, a dropped `.tileset`
     makes a map, Tab paints (left), erases (right), Ctrl+click picks; a stroke one undo
     step; Tiles: Pick Brush….
   - **E13-3b, flat tile layers drawn** (#528): a quad per visible chunk with its own
