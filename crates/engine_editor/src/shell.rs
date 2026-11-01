@@ -1123,6 +1123,15 @@ pub struct GraphBar<'a> {
     pub crumbs: &'a [&'a str],
 }
 
+/// An image's tab's bar (ADR 0125's E13-2c): its file and a line about it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheetBar<'a> {
+    /// The image's file.
+    pub path: &'a str,
+    /// Its size, slices, clips, zoom and what is picked.
+    pub status: &'a str,
+}
+
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
 /// the carets among them, by line and column; the shell puts them on the monospace grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1212,6 +1221,12 @@ pub struct ShellModel<'a> {
     pub active_graph: Option<usize>,
     /// The shown graph's bar.
     pub graph: Option<GraphBar<'a>>,
+    /// Open images (tabs after the graphs', ADR 0125's E13-2c).
+    pub sheets: &'a [&'a str],
+    /// The image tab shown, if one is: its sheet instead of the viewport.
+    pub active_sheet: Option<usize>,
+    /// The shown image's bar.
+    pub sheet: Option<SheetBar<'a>>,
     /// Tools in the tool bar, and the active one.
     pub tools: &'a [&'a str],
     /// The active tool.
@@ -1350,6 +1365,12 @@ pub struct ShellResponse {
     pub close_graph: Option<usize>,
     /// Id of the canvas while a graph is shown; its rectangle from [`Ui::rect_of`].
     pub graph_canvas: u64,
+    /// An image tab was clicked (E13-2c).
+    pub sheet_tab: Option<usize>,
+    /// An image tab's close mark was clicked.
+    pub close_sheet: Option<usize>,
+    /// Id of the sheet's canvas while an image is shown.
+    pub sheet_canvas: u64,
     /// Id of its preview's picture (none: 0): presses there are not the canvas's.
     pub graph_preview: u64,
     /// Its bar's Show Slang was clicked (E10-3f-3).
@@ -1840,9 +1861,29 @@ fn center(
             scene_tabs(ui, model, p, out);
             script_tabs(ui, model, p, out);
             graph_tabs(ui, model, p, out);
+            sheet_tabs(ui, model, p, out);
             ui.spacer("fill");
             play_controls(ui, model.playing, model.paused, p, out);
         });
+        // An image's tab (ADR 0125's E13-2c): its bar, and its sheet where the tool bar
+        // and the viewport are (the app draws it, under the panels).
+        if let Some(sheet) = &model.sheet {
+            ui.row("sheet bar", bar(p, 30.0).background(p.dock), |ui| {
+                text(ui, "path", sheet.path, TEXT, p.text_dim);
+                ui.spacer("fill");
+                text(ui, "status", sheet.status, TEXT, p.text_dim);
+            });
+            out.sheet_canvas = ui.container(
+                "sheet",
+                Style {
+                    clip: true,
+                    ..Style::fill()
+                },
+                |_| {},
+            );
+            file_browser(ui, model, p, out);
+            return;
+        }
         // A graph's tab (ADR 0123): its bar, and its canvas where the tool bar and the
         // viewport are (the app draws it, under the panels).
         if let Some(graph) = &model.graph {
@@ -2167,7 +2208,8 @@ fn scene_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
         ui.push_id(i as u64);
         let on = model.active_scene == i
             && model.active_script.is_none()
-            && model.active_graph.is_none();
+            && model.active_graph.is_none()
+            && model.active_sheet.is_none();
         let mut close = None;
         let id = ui.container(
             "tab",
@@ -2288,6 +2330,47 @@ fn graph_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
             out.close_graph = Some(i);
         } else if ui.sense(id, false).clicked {
             out.graph_tab = Some(i);
+        }
+        ui.pop_id();
+    }
+}
+
+/// The open images' tabs, after the graphs' (ADR 0125's E13-2c).
+fn sheet_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
+    for (i, label) in model.sheets.iter().enumerate() {
+        ui.push_id(i as u64);
+        let on = model.active_sheet == Some(i);
+        let mut close = 0;
+        let id = ui.container(
+            "sheet tab",
+            Style {
+                padding: [8.0, 5.0, 8.0, 5.0],
+                gap: 6.0,
+                radius: 3.0,
+                background: on.then_some(p.dock),
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                text(ui, "icon", icons::TEXTURE, ICON, srgb(150, 200, 120));
+                let color = if on { p.text } else { p.text_dim };
+                text(ui, "label", label, TEXT, color);
+                close = ui.container(
+                    "close",
+                    Style {
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "icon", icons::CLOSE, ICON, p.text_dim);
+                    },
+                );
+            },
+        );
+        if ui.sense(close, false).clicked {
+            out.close_sheet = Some(i);
+        } else if ui.sense(id, false).clicked {
+            out.sheet_tab = Some(i);
         }
         ui.pop_id();
     }

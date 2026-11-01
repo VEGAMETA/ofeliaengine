@@ -1921,3 +1921,137 @@ fn a_click_in_the_2d_view_picks_the_sprite_that_shows_there() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An image's tab (ADR 0125's E13-2c): opened, the sheet drawn pixel for pixel at a whole
+/// zoom (nearest sampling: no blended colours at its pixels' edges), a click on a slice
+/// picks it.
+#[test]
+fn an_images_tab_draws_its_sheet_and_picks_a_slice() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-sheet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+    // 32 × 16: a red and green checker of 1-pixel squares on the left half, blue right.
+    let rgba: Vec<u8> = (0..16u32)
+        .flat_map(|y| (0..32u32).map(move |x| (x, y)))
+        .flat_map(|(x, y)| match (x < 16, (x + y) % 2 == 0) {
+            (true, true) => [255, 0, 0, 255],
+            (true, false) => [0, 255, 0, 255],
+            (false, _) => [0, 0, 255, 255],
+        })
+        .collect();
+    let png =
+        engine_render::png::encode_png(32, 16, engine_render::png::PngFormat::Rgba, &rgba).unwrap();
+    std::fs::write(dir.join("art/sheet.png"), png).unwrap();
+    let id = AssetId::new();
+    let meta = engine_scene::AssetMeta {
+        sprite: engine_scene::SpriteImport {
+            slices: vec![
+                engine_scene::SliceImport {
+                    name: String::from("left"),
+                    rect: [0, 0, 16, 16],
+                    ..engine_scene::SliceImport::default()
+                },
+                engine_scene::SliceImport {
+                    name: String::from("right"),
+                    rect: [16, 0, 16, 16],
+                    ..engine_scene::SliceImport::default()
+                },
+            ],
+            ..engine_scene::SpriteImport::default()
+        },
+        ..engine_scene::AssetMeta::default()
+    };
+    meta.write(&dir.join("art/sheet.png"), id).unwrap();
+    std::fs::write(dir.join("main.scene"), "").unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor sheet test"),
+        window: Window::Offscreen { width, height },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    assert!(game.open_image("art/sheet.png"), "the image is known");
+    // Frames until the sheet shows: red, green and blue pixels in large square runs.
+    let count =
+        |rgba: &[u8], want: [u8; 3]| rgba.chunks_exact(4).filter(|p| p[..3] == want).count();
+    let mut shown = None;
+    for _ in 0..200 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        if let Ok(path) = std::env::var("ENGINE_EDITOR_SHEET_PNG") {
+            let png = engine_render::png::encode_png(
+                width,
+                height,
+                engine_render::png::PngFormat::Rgba,
+                &rgba,
+            )
+            .unwrap();
+            std::fs::write(path, png).unwrap();
+        }
+        if count(&rgba, [0, 0, 255]) > 1000 && count(&rgba, [255, 0, 0]) > 1000 {
+            shown = Some(rgba);
+            break;
+        }
+    }
+    let rgba = shown.expect("the sheet drawn");
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_SHEET_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // Nearest sampling: as many red pixels as green ones (the checker's halves), and no
+    // blend of the two (a linear filter would give yellowish browns at every edge).
+    let (red, green) = (count(&rgba, [255, 0, 0]), count(&rgba, [0, 255, 0]));
+    assert!(red.abs_diff(green) * 20 < red, "{red} red, {green} green");
+    let blended = rgba
+        .chunks_exact(4)
+        .filter(|p| p[0] > 60 && p[1] > 60 && p[2] < 30 && p[0] < 230)
+        .count();
+    assert!(blended < red / 50, "{blended} blended pixels");
+    // A click on the blue half picks the right slice.
+    let blue_at = rgba
+        .chunks_exact(4)
+        .position(|p| p[..3] == [0, 0, 255])
+        .unwrap() as u32;
+    let (bx, by) = (blue_at % width + 8, blue_at / width + 8);
+    send(
+        &mut game,
+        WindowEventKind::CursorMoved {
+            x: bx as i32,
+            y: by as i32,
+        },
+    );
+    editor_frame(&mut player, &mut game, &mut overlay);
+    left_click(&mut player, &mut game, &mut overlay);
+    let (slices, picked, status) = game.image_tab().expect("its tab shows");
+    assert_eq!((slices, picked), (2, vec![1]), "{status}");
+    assert!(status.contains("right (frame 1)"), "{status}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

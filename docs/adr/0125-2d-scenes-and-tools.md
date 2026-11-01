@@ -887,3 +887,31 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c-2 and later):** the image's tab itself (the sheet at whole-number zooms
   with its slices, slicing by hand, pivots and borders, picking frames, Make Clip);
   graphs of sprite clips; Aseprite files; sliced and tiled modes.
+
+## As built (E13-2c-2, 2026-11-01): the image's tab
+
+- **A tab per image** after the graphs' (`sheet.rs`'s `SheetDoc`, the shell's
+  `SheetBar` and `sheet_tabs`): a double click on an image in the dock opens it (or shows
+  its tab); the bar shows its path and a line (size, slices, clips, zoom, the picked
+  slice's name, frame and rectangle). Showing a scene, script or graph hides it.
+- **The sheet:** drawn by the app into the canvas over the viewport, as graphs are: a
+  dark ground, the image as one quad sampled by nearest pixel at a zoom of 1/8 to 32
+  screen pixels a pixel (framed to the largest that fits, F again), the slices' outlines,
+  the picked ones in the accent colour with their pivots. Its texture is the player's
+  (`Player::sprite_texture`: the image's slot's texture in the pool, whatever views
+  draw, so a 3D scene's editor shows it too).
+- **Input:** the wheel zooms about the pointer, middle or right drags pan, a click picks
+  the smallest slice under it (Shift a range from the anchor, Ctrl adds or takes away,
+  on nothing lets go), Escape lets go; **M** makes a clip of the picked frames (lowest to
+  highest, `clip_n` with the lowest free number, 0.1 s a frame, looping), **Delete**
+  takes the picked slices away (through `run`, so the scene's Delete does not run while
+  the tab shows; Duplicate does nothing there), Ctrl+W closes it. Edits go through
+  `edit_image_meta`: one undo step, the `.meta` written, the tab and the player follow.
+- Tests: the sheet's framing, point mapping, zoom about the pointer and pan; picking by
+  click, range and toggle; the bar's line; the editor opening an image's tab, M making
+  a clip of frames 1 to 3, Delete taking a slice away with the scene untouched, undo;
+  on a player, the sheet drawn pixel for pixel (no blended colours at a checker's
+  edges) and a click picking the slice under it.
+- **Left (E13-2c-3 and later):** slicing by hand (drag a rectangle, a double click
+  fitting it), renaming, pivot presets and dragging, nine-slice borders, the clips'
+  list with a preview; graphs of sprite clips; Aseprite files; sliced and tiled modes.
