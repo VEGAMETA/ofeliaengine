@@ -939,7 +939,10 @@ Last updated: 2026-10-28.
   - **E13-1b-1, the editor's 2D view** (#509, ADR 0125's as-built): View: 2D (orthographic
     onto XY, the 3D camera kept), drags pan, the wheel zooms about the pointer by whole
     numbers of the art's pixels, Ctrl+0 is 100 %, F frames in XY.
-  - **E14's project settings: research and ADR 0127** (#508, proposed, 5 questions):
+  - **S1, the input map in `settings/input.settings`** (#530, ADR 0127 accepted: team
+    decision 2026-11-01, all а): bindings as text in `engine_input`, `InputSettings`
+    with its map, the player reading the file when the game set no map in code.
+  - **E14's project settings: research and ADR 0127** (#508, accepted 2026-11-01):
     `docs/research/ux/project-settings.md` (Godot, Unity, Unreal); files per area in
     `settings/`, rebinding as player overrides, editor-baked `<scene>.navmesh` with a paths
     API, named collision layers with a matrix, lighting per scene; phases S1–S6. Waiting

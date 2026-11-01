@@ -1,6 +1,6 @@
 # ADR 0127: Project settings (input map, navigation, physics, lighting)
 
-Status: **Proposed** (2026-11-01). Five questions for the team below.
+Status: **Accepted** (team decision, 2026-11-01: 1а, 2а, 3а, 4а, 5а, every recommendation).
 
 ## Context
 
@@ -63,3 +63,38 @@ Unreal).
 3. Navigation: baked by the editor into `<scene>.navmesh` (а) or at build time only (б)?
 4. Physics: gravity, tick, steps and named layers with a matrix now (а), or layers later (б)?
 5. Lighting: per scene with project defaults (а) or project-wide (б)?
+
+## As built (S1, 2026-11-01): the input map in `settings/input.settings`
+
+- **Bindings as text** (`engine_input::text`): `Binding::to_text` and `Binding::parse`,
+  and `ButtonSource::to_text` / `parse`:
+  - a key by its name (`KeyW`), with modifiers before it (`ControlLeft+KeyS`);
+  - `Mouse.Left`, `Pad.South`, `Pad.LeftTrigger+` / `Pad.LeftX-`, `Wheel.Up`;
+  - two buttons for a 1D axis (`KeyA / KeyD`), an analog axis (`Axis.LeftY*-1`);
+  - four buttons for a 2D axis (`KeyW, KeyS, KeyA, KeyD`: up, down, left, right);
+  - a stick (`Stick.Left*0.5`) and mouse motion (`MouseMotion*0.1`).
+
+  Every kind round-trips, and bad text says what it could not read.
+- **`engine_app::project_settings::InputSettings`** (`settings/input.settings`, kind
+  `input`, version 1) is one value in the scenes' grammar:
+  - `contexts` by name (priority, enabled, blocks_lower), besides the implicit `default`;
+  - `actions` by name (kind `Button` / `Axis1d` / `Axis2d`, deadzone, and `bindings` by
+    context as lists of binding texts).
+
+  Lines at their defaults are left out, except an action's kind.
+- **`InputSettings::to_map`** builds an `engine_input::InputMap`: contexts by priority,
+  actions in name order, each binding bound in its context. A binding that names no input,
+  does not fit its action or conflicts, and a context that does not exist, are left out
+  and returned as problems (the player logs them).
+- **The player:** with no `PlayerSettings::input` set in code and a project folder, it
+  reads the project's `settings/input.settings` at start. A game's own map wins.
+- **Tests:**
+  - every binding kind round-trips, and bad text is an error;
+  - the file round-trips without its defaults;
+  - the map it makes (kinds, bindings per context, a bad binding left out and said);
+  - an offscreen player with only the file sees "jump" on Space.
+- **Left:**
+  - Luau completion of action names from the file;
+  - the Project Settings tab (S2);
+  - the player's overrides and rebinding API (S3);
+  - physics, navigation, lighting (S4–S6).

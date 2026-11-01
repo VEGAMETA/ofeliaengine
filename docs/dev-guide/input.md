@@ -6,6 +6,26 @@ them. Players can rebind them; your code does not change.
 
 ## 1. Define actions
 
+**In the project** (no code): `settings/input.settings` holds the actions, each with its
+bindings by context. A game that sets no map in code takes it at start:
+
+```text
+[input version=1 id=…]
+
+contexts["menu"].priority = 10
+actions["jump"].kind = Button
+actions["jump"].bindings["default"] = ["Space", "Pad.South"]
+actions["move"].kind = Axis2d
+actions["move"].bindings["default"] = ["KeyW, KeyS, KeyA, KeyD", "Stick.Left"]
+actions["look"].kind = Axis2d
+actions["look"].bindings["default"] = ["MouseMotion*0.1", "Stick.Right*4"]
+actions["save"].bindings["default"] = ["ControlLeft+KeyS"]
+actions["pause"].bindings["menu"] = ["Escape"]
+```
+
+A binding the file cannot read, or one that does not fit its action, is left out and
+logged. **In code**, the same map:
+
 ```rust
 use engine_input::{Binding, GamepadButton, InputMap, Key, MouseButton, Stick};
 
