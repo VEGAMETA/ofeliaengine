@@ -31,6 +31,7 @@ pub mod navigation;
 pub mod pack;
 pub mod panorama;
 pub mod pso_record;
+pub mod slicing;
 pub mod sounds;
 pub mod strings;
 mod texture_compress;

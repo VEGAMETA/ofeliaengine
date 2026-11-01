@@ -1262,6 +1262,8 @@ struct CommandIds {
     zip_build: CommandId,
     view_2d: CommandId,
     actual_size: CommandId,
+    slice_grid: CommandId,
+    slice_islands: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1518,6 +1520,8 @@ fn commands() -> (Commands, CommandIds) {
         zip_build: c.register("build.zip", "Build", "Zip the Last Build"),
         view_2d: c.register("view.2d", "View", "2D (orthographic onto XY) or 3D"),
         actual_size: c.register("view.actual_size", "View", "2D: the Art at 100 %"),
+        slice_grid: c.register("image.slice_grid", "Image", "Slice by Grid…"),
+        slice_islands: c.register("image.slice_islands", "Image", "Slice by Islands"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -2556,6 +2560,9 @@ enum Pick {
     Select(Entity),
     /// Sets a snapping step (0 position, 1 angle, 2 scale) to this value.
     Step(usize, f64),
+    /// Slices the inspected image by a grid of square cells this many pixels a side
+    /// (ADR 0125's E13-2c).
+    SliceGrid(u32),
     /// Keeps a change made while playing, or not (E3-3).
     Keep(KeepItem),
     /// Shows this asset in the FileSystem dock.
@@ -9691,6 +9698,7 @@ impl Editor {
                             Pick::Keys(p) => self.set_key_preset(world, p),
                             Pick::Select(e) => self.show(world, e),
                             Pick::Step(k, value) => self.set_step(world, k, value),
+                            Pick::SliceGrid(cell) => self.slice_image(world, Some(cell)),
                             Pick::Keep(item) => self.toggle_keep(world, item),
                             Pick::Reveal(id) => self.reveal_asset(id),
                             Pick::Component { name, .. } => self.add_component(world, &name),
@@ -10619,6 +10627,113 @@ impl Editor {
         self.write_session(world);
         let what = ["Position", "Angle", "Scale"][kind.min(2)];
         self.say(format!("{what} step {}", step_label(kind, value)));
+    }
+
+    /// "Image: Slice by Grid…" (ADR 0125's E13-2c): the cell sizes in the palette.
+    fn pick_slice_grid(&mut self, world: &mut World) {
+        if self.inspected_image().is_none() {
+            self.say(String::from(
+                "Pick an image in the FileSystem dock to slice it",
+            ));
+            return;
+        }
+        let items = SLICE_CELLS
+            .iter()
+            .map(|&cell| Choice {
+                label: format!("{cell} × {cell} px"),
+                detail: String::new(),
+                pick: Pick::SliceGrid(cell),
+            })
+            .collect();
+        self.open_list(world, "The cell's size", items);
+    }
+
+    /// The inspected asset when it is an image: its id and path.
+    fn inspected_image(&self) -> Option<(AssetId, String)> {
+        self.inspected
+            .as_ref()
+            .filter(|a| a.kind == engine_scene::AssetKind::Texture)
+            .map(|a| (a.id, a.path.clone()))
+    }
+
+    /// Slices the inspected image (ADR 0125's E13-2c) by a grid of `cell`-pixel squares
+    /// (cells with nothing drawn left out), or by its islands of visible pixels: its
+    /// `.meta`'s slices made again, those that stay keeping their names, pivots and
+    /// borders, new ones named after the file; one undo step; the player shows them.
+    fn slice_image(&mut self, world: &mut World, cell: Option<u32>) {
+        let Some((id, path)) = self.inspected_image() else {
+            self.say(String::from(
+                "Pick an image in the FileSystem dock to slice it",
+            ));
+            return;
+        };
+        let file = self.root.join(&path);
+        let image = match std::fs::read(&file)
+            .map_err(|e| e.to_string())
+            .and_then(|b| engine_assets::decode_image(&b).map_err(|e| e.to_string()))
+        {
+            Ok(image) => image,
+            Err(e) => {
+                self.say(format!("{path}: not sliced ({e})"));
+                return;
+            }
+        };
+        let size = [image.width, image.height];
+        let rects = match cell {
+            Some(cell) => engine_assets::slicing::grid_rects(
+                size,
+                engine_assets::slicing::SliceGrid::cells(cell, cell),
+                Some(&image.rgba),
+            ),
+            None => engine_assets::slicing::island_rects(size, &image.rgba, 2),
+        };
+        if rects.is_empty() {
+            self.say(format!("{path}: nothing drawn to slice"));
+            return;
+        }
+        let mut meta = AssetMeta::read(&file);
+        let before = meta.to_text(id);
+        let stem = std::path::Path::new(&path).file_stem().map_or_else(
+            || String::from("slice"),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let old = core::mem::take(&mut meta.sprite.slices);
+        meta.sprite.slices =
+            engine_assets::slicing::reslice(&old, &rects, &stem, meta.sprite.pivot);
+        let kept = meta
+            .sprite
+            .slices
+            .iter()
+            .filter(|s| old.iter().any(|o| o.name == s.name))
+            .count();
+        let after = meta.to_text(id);
+        if after == before {
+            self.say(format!("{path}: sliced as it was"));
+            return;
+        }
+        if let Err(e) = std::fs::write(AssetMeta::path(&file), &after) {
+            self.say(format!("{path}: slices not saved ({e})"));
+            return;
+        }
+        self.history.begin("Slice Image", None);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+        self.image_meta_written(id, &meta);
+        self.say(format!(
+            "{path}: {} slices ({kept} kept their names)",
+            meta.sprite.slices.len()
+        ));
+    }
+
+    /// Image `id`'s `.meta` was written as `meta`: the inspector shows it, the player makes
+    /// the image's sprites again.
+    fn image_meta_written(&mut self, id: AssetId, meta: &AssetMeta) {
+        if let Some(asset) = self.inspected.as_mut().filter(|a| a.id == id) {
+            asset.meta = meta.clone();
+            asset.saved = meta.clone();
+            asset.refresh();
+        }
+        self.changed_assets.push(id);
     }
 
     /// "Snapping: Position Step…" and the others: the step's values in the palette.
@@ -19314,6 +19429,10 @@ impl Editor {
                     ));
                 }
             }
+        } else if id == ids.slice_grid {
+            self.pick_slice_grid(world);
+        } else if id == ids.slice_islands {
+            self.slice_image(world, None);
         } else if id == ids.actual_size {
             if self.orbit.flat.is_some() {
                 let height = self.view_rect.map_or(720.0, |r| r[3] as f32);
@@ -21238,6 +21357,22 @@ impl Editor {
                             Err(e) => log::warn!(target: "engine_editor", "{e}"),
                         }
                     }
+                }
+            }
+            // An image's slices (E13-2c): its `.meta` written back, the player told.
+            let image_path = self
+                .asset_db
+                .get(id)
+                .filter(|e| e.kind == engine_scene::AssetKind::Texture)
+                .map(|e| e.path.clone());
+            if let Some(path) = image_path {
+                let file = self.root.join(&path);
+                match std::fs::write(AssetMeta::path(&file), &*text) {
+                    Ok(()) => {
+                        let meta = AssetMeta::read(&file);
+                        self.image_meta_written(id, &meta);
+                    }
+                    Err(e) => log::warn!(target: "engine_editor", "{path}: {e}"),
                 }
             }
             // A model's clip events (E12-3b-2): its `.meta`, held by the Animation tab or
@@ -33070,6 +33205,9 @@ fn record_pso(player: &Player, root: &Path) {
 /// of them is one screen pixel.
 const ART_PIXELS_PER_UNIT: f32 = 16.0;
 
+/// The cell sizes "Image: Slice by Grid…" offers (E13-2c), in pixels.
+const SLICE_CELLS: [u32; 7] = [8, 16, 24, 32, 48, 64, 128];
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp)]
@@ -34311,6 +34449,60 @@ mod tests {
     /// The 2D view (ADR 0125's E13-1b): an image dropped on it is a sprite of it at the
     /// pointer, its place on whole art pixels, one undo step; View: 2D again is the 3D view
     /// as it was.
+    /// An image sliced in the editor (ADR 0125's E13-2c): by a grid, empty cells left out;
+    /// by islands, the slices that stay keeping their names; each an undo step.
+    #[test]
+    fn an_image_is_sliced_by_grid_and_islands() {
+        let (dir, mut world, mut ed, _) = drop_project("slice-image");
+        // 48 × 16: something drawn in the first and third 16-pixel cells.
+        let rgba: Vec<u8> = (0..16u32)
+            .flat_map(|y| (0..48u32).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let on = ((2..14).contains(&x) || (34..44).contains(&x)) && (3..13).contains(&y);
+                [200, 50, 50, if on { 255 } else { 0 }]
+            })
+            .collect();
+        let png =
+            engine_render::png::encode_png(48, 16, engine_render::png::PngFormat::Rgba, &rgba)
+                .unwrap();
+        std::fs::write(dir.join("props/hero.png"), png).unwrap();
+        ed.open_assets();
+        let id = ed.asset_db.find("props/hero.png").expect("found").id;
+        ed.reveal_asset(id);
+        let slices = |dir: &std::path::Path| {
+            AssetMeta::read(&dir.join("props/hero.png"))
+                .sprite
+                .slices
+                .iter()
+                .map(|s| (s.name.clone(), s.rect))
+                .collect::<Vec<_>>()
+        };
+        ed.slice_image(&mut world, Some(16));
+        assert_eq!(
+            slices(&dir),
+            [
+                (String::from("hero_0"), [0, 0, 16, 16]),
+                (String::from("hero_1"), [32, 0, 16, 16]),
+            ]
+        );
+        // Islands: each drawing's own rectangle, covering more than half of its cell's, so
+        // the slices keep their names.
+        ed.slice_image(&mut world, None);
+        assert_eq!(
+            slices(&dir),
+            [
+                (String::from("hero_0"), [2, 3, 12, 10]),
+                (String::from("hero_1"), [34, 3, 10, 10]),
+            ]
+        );
+        assert_eq!(ed.history.steps().count(), 2);
+        // Undone: the grid's slices back in the file.
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(slices(&dir)[0].1, [0, 0, 16, 16]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_image_dropped_on_the_2d_view_is_a_sprite_there() {
         let (dir, mut world, mut ed, _) = drop_project("drop-sprite");
