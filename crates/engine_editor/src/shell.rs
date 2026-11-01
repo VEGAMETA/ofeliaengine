@@ -1132,6 +1132,10 @@ pub struct SheetBar<'a> {
     pub status: &'a str,
     /// The picked slice's name while it is being renamed (F2, E13-2c-4): a field for it.
     pub renaming: Option<&'a str>,
+    /// Its clips (E13-2c-5): a chip each (`run 4–9 · 80 ms · loop`), the chosen one lit.
+    pub clips: &'a [&'a str],
+    /// The chosen clip.
+    pub clip: Option<usize>,
 }
 
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
@@ -1376,6 +1380,8 @@ pub struct ShellResponse {
     /// Renaming the picked slice ended: committed (the name is `Ui::edited_text`) or
     /// cancelled (E13-2c-4).
     pub sheet_rename: Option<bool>,
+    /// A clip's chip in an image's tab was clicked (E13-2c-5).
+    pub sheet_clip: Option<usize>,
     /// Id of its preview's picture (none: 0): presses there are not the canvas's.
     pub graph_preview: u64,
     /// Its bar's Show Slang was clicked (E10-3f-3).
@@ -1892,6 +1898,19 @@ fn center(
                 ui.spacer("fill");
                 text(ui, "status", sheet.status, TEXT, p.text_dim);
             });
+            // Its clips' chips (E13-2c-5): a click chooses one (again: lets go).
+            if !sheet.clips.is_empty() {
+                ui.row("sheet clips", bar(p, 28.0).background(p.dock), |ui| {
+                    text(ui, "icon", icons::PLAY, ICON, p.text_dim);
+                    for (k, label) in sheet.clips.iter().enumerate() {
+                        ui.push_id(k as u64);
+                        if label_button(ui, "clip", label, sheet.clip == Some(k), p.accent, p) {
+                            out.sheet_clip = Some(k);
+                        }
+                        ui.pop_id();
+                    }
+                });
+            }
             out.sheet_canvas = ui.container(
                 "sheet",
                 Style {

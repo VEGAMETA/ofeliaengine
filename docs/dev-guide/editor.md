@@ -1823,7 +1823,12 @@ pixels; it is named after the file and picked), or double-click a drawing to fit
 around it. **Image: Slice Pivot…** sets the picked slices' pivot from nine presets (the
 centre, the feet, the corners, the edges' middles). **F2** renames the picked slice in
 the tab's bar (Enter keeps it, Escape leaves it); sprites of the open scene that name it
-(`hero.png#run_0`) follow the new name in the same undo step. Each is one undo step; Escape lets go
+(`hero.png#run_0`) follow the new name in the same undo step.
+
+The image's clips show as chips under the tab's bar (`run 4–9 · 80 ms · loop`). Click one
+to choose it: its frames are outlined in green and it plays in the canvas's top right
+corner as the game will play it; click it again (or Escape) to let go. With a clip chosen,
+**F2** renames it and **Delete** takes it away (the slices stay). Each is one undo step; Escape lets go
 of the picks, Ctrl+W closes the tab.
 Slice the sheet with **Image: Slice by Grid…** or **Image: Slice by Islands** (see the 2D
 guide).

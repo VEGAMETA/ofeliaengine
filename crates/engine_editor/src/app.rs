@@ -7626,6 +7626,11 @@ impl Editor {
             self.sheet_labels = self.sheets.iter().map(|d| d.tab.clone()).collect();
         }
         let sheet_tabs: Vec<&str> = self.sheet_labels.iter().map(String::as_str).collect();
+        let sheet_clips: Vec<&str> = self
+            .active_sheet
+            .and_then(|k| self.sheets.get(k))
+            .map(|d| d.clip_labels.iter().map(String::as_str).collect())
+            .unwrap_or_default();
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
@@ -7646,11 +7651,14 @@ impl Editor {
                     status: &self.sheet_status,
                     renaming: self
                         .sheet_renaming
-                        .then(|| match doc.picked.as_slice() {
-                            [k] => doc.slices.get(*k).map(|s| s.name.as_str()),
+                        .then(|| match (doc.clip, doc.picked.as_slice()) {
+                            (Some((c, _)), _) => doc.clip_list.get(c).map(|c| c.name.as_str()),
+                            (None, [k]) => doc.slices.get(*k).map(|s| s.name.as_str()),
                             _ => None,
                         })
                         .flatten(),
+                    clips: &sheet_clips,
+                    clip: doc.clip.map(|(c, _)| c),
                 }),
             tools: &tools,
             active_tool: self.active_tool,
@@ -8262,13 +8270,30 @@ impl Editor {
         } else if let Some(k) = response.sheet_tab {
             self.show_sheet(k);
         }
-        // The picked slice renamed in the image tab's bar (F2, E13-2c-4).
+        // The picked slice, or the chosen clip, renamed in the image tab's bar (F2,
+        // E13-2c-4, E13-2c-5).
         if let Some(commit) = response.sheet_rename {
             if commit {
                 let name = self.ui.edited_text().trim().to_owned();
-                self.rename_slice(world, &name);
+                let clip = self
+                    .active_sheet
+                    .and_then(|k| self.sheets.get(k))
+                    .and_then(|d| d.clip);
+                match clip {
+                    Some((c, _)) => self.rename_sprite_clip(world, c, &name),
+                    None => self.rename_slice(world, &name),
+                }
             }
             self.sheet_renaming = false;
+        }
+        // A clip's chip: chosen (its preview starts), or let go when it was.
+        if let Some(c) = response.sheet_clip
+            && let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get_mut(k))
+        {
+            doc.clip = match doc.clip {
+                Some((was, _)) if was == c => None,
+                _ => Some((c, Instant::now())),
+            };
         }
         self.find_focus = None;
         self.find_frame(&response);
@@ -14703,6 +14728,7 @@ impl Editor {
                     Key::Escape => {
                         doc.picked.clear();
                         doc.anchor = None;
+                        doc.clip = None;
                     }
                     _ => {}
                 }
@@ -14836,6 +14862,51 @@ impl Editor {
             n => format!(" ({n} sprites of the scene follow it)"),
         };
         self.say(format!("{path}: {old} is now {name}{followed}"));
+    }
+
+    /// Clip `c` of the image tab shown renamed `name` (F2 with it chosen, E13-2c-5), one
+    /// undo step; a name another clip has, or an empty one, is refused. Animators naming
+    /// it by its old name play the first clip until changed.
+    fn rename_sprite_clip(&mut self, world: &mut World, c: usize, name: &str) {
+        let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get(k)) else {
+            return;
+        };
+        let Some(old) = doc.clip_list.get(c).map(|c| c.name.clone()) else {
+            return;
+        };
+        if name.is_empty() || name == old {
+            return;
+        }
+        if doc.clip_list.iter().any(|c| c.name == name) {
+            self.say(format!("Another clip is named {name}"));
+            return;
+        }
+        let (id, path) = (doc.id, doc.path.clone());
+        let new = name.to_owned();
+        self.edit_image_meta(world, id, &path, "Rename Clip", |meta| {
+            if let Some(clip) = meta.sprite.clips.get_mut(c) {
+                clip.name.clone_from(&new);
+            }
+        });
+        self.say(format!("{path}: clip {old} is now {name}"));
+    }
+
+    /// Clip `c` of the image tab shown taken away (Delete with it chosen), one undo step.
+    fn delete_sprite_clip(&mut self, world: &mut World, c: usize) {
+        let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get_mut(k)) else {
+            return;
+        };
+        let Some(name) = doc.clip_list.get(c).map(|c| c.name.clone()) else {
+            return;
+        };
+        doc.clip = None;
+        let (id, path) = (doc.id, doc.path.clone());
+        self.edit_image_meta(world, id, &path, "Delete Clip", |meta| {
+            if c < meta.sprite.clips.len() {
+                meta.sprite.clips.remove(c);
+            }
+        });
+        self.say(format!("{path}: clip {name} deleted"));
     }
 
     /// "Image: Slice Pivot…" (E13-2c-3): the presets in the palette, for the picked slices
@@ -19377,7 +19448,9 @@ impl Editor {
         // it, Ctrl+W closes it; the scene's editing commands do nothing there.
         if let Some(k) = self.active_sheet.filter(|&k| k < self.sheets.len()) {
             if id == ids.delete {
-                if !self.sheets[k].picked.is_empty() {
+                if let Some((c, _)) = self.sheets[k].clip {
+                    self.delete_sprite_clip(world, c);
+                } else if !self.sheets[k].picked.is_empty() {
                     self.delete_slices(world);
                 }
                 return;
@@ -19391,10 +19464,10 @@ impl Editor {
                 return;
             }
             if id == ids.rename {
-                if self.sheets[k].picked.len() == 1 {
+                if self.sheets[k].clip.is_some() || self.sheets[k].picked.len() == 1 {
                     self.sheet_renaming = true;
                 } else {
-                    self.say(String::from("Pick one slice to rename it"));
+                    self.say(String::from("Pick one slice or a clip to rename it"));
                 }
                 return;
             }
@@ -35002,6 +35075,49 @@ mod tests {
     /// The 2D view (ADR 0125's E13-1b): an image dropped on it is a sprite of it at the
     /// pointer, its place on whole art pixels, one undo step; View: 2D again is the 3D view
     /// as it was.
+    /// An image's clips in its tab (E13-2c-5): listed as chips, chosen (preview), renamed
+    /// with F2 and deleted with Delete, each an undo step; the slices stay.
+    #[test]
+    fn an_images_clips_are_listed_renamed_and_deleted() {
+        let (dir, mut world, mut ed, _) = drop_project("image-clips");
+        let png = engine_render::png::encode_png(
+            64,
+            16,
+            engine_render::png::PngFormat::Rgba,
+            &[255u8; 64 * 16 * 4],
+        )
+        .unwrap();
+        std::fs::write(dir.join("props/run.png"), png).unwrap();
+        ed.open_assets();
+        let id = ed.asset_db.find("props/run.png").expect("found").id;
+        ed.reveal_asset(id);
+        ed.slice_image(&mut world, Some(16));
+        ed.open_sheet(id, "props/run.png");
+        ed.sheets[0].click(Some(0), false, false);
+        ed.sheets[0].click(Some(3), true, false);
+        ed.make_sprite_clip(&mut world);
+        assert_eq!(
+            ed.sheets[0].clip_labels,
+            ["clip_0 0\u{2013}3 · 100 ms · loop"]
+        );
+        ed.sheets[0].clip = Some((0, Instant::now()));
+        let rename = ed.ids.rename;
+        ed.run(&mut world, rename);
+        assert!(ed.sheet_renaming);
+        ed.rename_sprite_clip(&mut world, 0, "run");
+        assert_eq!(ed.sheets[0].clip_list[0].name, "run");
+        // Delete with the clip chosen takes the clip, not the slices.
+        let delete = ed.ids.delete;
+        ed.run(&mut world, delete);
+        let meta = AssetMeta::read(&dir.join("props/run.png"));
+        assert!(meta.sprite.clips.is_empty());
+        assert_eq!(meta.sprite.slices.len(), 4);
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(ed.sheets[0].clip_list[0].name, "run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A slice renamed in its image's tab (F2, E13-2c-4): the `.meta` and the open scene's
     /// sprites naming it follow, one undo step; a name another slice has is refused.
     #[test]

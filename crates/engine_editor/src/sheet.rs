@@ -29,6 +29,12 @@ pub(crate) struct SheetDoc {
     pub(crate) slices: Vec<SliceImport>,
     /// Its clips' count, for the bar.
     pub(crate) clips: usize,
+    /// Its clips as the `.meta` holds them (E13-2c-5).
+    pub(crate) clip_list: Vec<engine_scene::SpriteClipImport>,
+    /// Their chips' labels.
+    pub(crate) clip_labels: Vec<String>,
+    /// The chosen clip, and when its preview started.
+    pub(crate) clip: Option<(usize, std::time::Instant)>,
     /// The picked slices, by index, in the order picked.
     pub(crate) picked: Vec<usize>,
     /// The slice a Shift+click ranges from.
@@ -50,6 +56,55 @@ pub(crate) struct SheetDoc {
     /// Its pixels, read from its file the first time a slice is fitted (RGBA8, rows from
     /// the top) with its size.
     pub(crate) pixels: Option<([u32; 2], Vec<u8>)>,
+}
+
+/// A clip's chip: its name, frames, frame time and mode (`run 4–9 · 80 ms · loop`).
+pub(crate) fn clip_label(c: &engine_scene::SpriteClipImport) -> String {
+    let mode = match c.mode {
+        engine_scene::SpriteClipMode::Loop => "loop",
+        engine_scene::SpriteClipMode::Once => "once",
+        engine_scene::SpriteClipMode::PingPong => "ping-pong",
+    };
+    format!(
+        "{} {}\u{2013}{} · {} ms · {mode}",
+        c.name,
+        c.first,
+        c.last,
+        (c.frame_time * 1000.0).round()
+    )
+}
+
+/// The frame clip `c` shows `t` seconds in, as the player plays it: its run (backwards
+/// when its last is below its first; ping-pong's way back without doubled ends), each
+/// frame its own duration or the frame time, round and round (held at the end once).
+pub(crate) fn clip_frame(c: &engine_scene::SpriteClipImport, t: f32) -> u32 {
+    let run: Vec<u32> = if c.last >= c.first {
+        (c.first..=c.last).collect()
+    } else {
+        (c.last..=c.first).rev().collect()
+    };
+    let mut places: Vec<usize> = (0..run.len()).collect();
+    if c.mode == engine_scene::SpriteClipMode::PingPong && run.len() > 2 {
+        places.extend((1..run.len() - 1).rev());
+    }
+    let time = |k: usize| {
+        let d = c.durations.get(k).copied().unwrap_or(c.frame_time);
+        if d.is_finite() && d > 0.0 { d } else { 0.1 }
+    };
+    let length: f32 = places.iter().map(|&k| time(k)).sum();
+    let mut t = if c.mode == engine_scene::SpriteClipMode::Once {
+        t.min(length - 1e-4)
+    } else {
+        t.rem_euclid(length.max(1e-4))
+    };
+    for &k in &places {
+        let d = time(k);
+        if t < d {
+            return run[k];
+        }
+        t -= d;
+    }
+    places.last().map_or(0, |&k| run[k])
 }
 
 /// The nine pivot presets (E13-2c-3): a name and the pivot (shares of the width and
@@ -104,6 +159,9 @@ impl SheetDoc {
             tab: path.rsplit('/').next().unwrap_or(path).to_owned(),
             slices: Vec::new(),
             clips: 0,
+            clip_list: Vec::new(),
+            clip_labels: Vec::new(),
+            clip: None,
             picked: Vec::new(),
             anchor: None,
             zoom: 6,
@@ -129,6 +187,9 @@ impl SheetDoc {
     pub(crate) fn set_meta(&mut self, meta: &AssetMeta) {
         self.slices = meta.sprite.slices.clone();
         self.clips = meta.sprite.clips.len();
+        self.clip_list = meta.sprite.clips.clone();
+        self.clip_labels = self.clip_list.iter().map(clip_label).collect();
+        self.clip = self.clip.filter(|(k, _)| *k < self.clip_list.len());
         let n = self.slices.len();
         self.picked.retain(|&k| k < n);
         self.anchor = self.anchor.filter(|&k| k < n);
@@ -331,6 +392,51 @@ pub(crate) fn draw(
             );
         }
     }
+    // The chosen clip (E13-2c-5): its frames outlined in green, its preview in the
+    // canvas's top right corner at a whole zoom, its frame by the time since chosen.
+    if let Some((k, since)) = doc.clip
+        && let Some(c) = doc.clip_list.get(k)
+    {
+        let green = Vec4::new(0.45, 0.9, 0.5, 1.0);
+        let (lo, hi) = (c.first.min(c.last) as usize, c.first.max(c.last) as usize);
+        for s in doc.slices.iter().take(hi + 1).skip(lo) {
+            let [x, y, w, h] = s.rect.map(|v| v as f32);
+            let (a, b, c2, d) = (
+                to([x, y]),
+                to([x + w, y]),
+                to([x + w, y + h]),
+                to([x, y + h]),
+            );
+            for (p, q) in [(a, b), (b, c2), (c2, d), (d, a)] {
+                canvas.draw(&Quad::line(p, q, scale.max(1.0)).color(green).order(order));
+            }
+        }
+        let frame = clip_frame(c, since.elapsed().as_secs_f32()) as usize;
+        if let (Some(s), Some((texture, size))) = (doc.slices.get(frame), doc.image) {
+            let [x, y, w, h] = s.rect.map(|v| v as f32);
+            let side = 128.0 * scale;
+            let k = ((side / w.max(h).max(1.0)).floor()).max(1.0);
+            let box_size = Vec2::new(w * k, h * k);
+            let center = Vec2::new(
+                rx + rw - 16.0 * scale - side * 0.5,
+                ry + 16.0 * scale + side * 0.5,
+            );
+            canvas.draw(
+                &Quad::solid(center, Vec2::splat(side + 8.0 * scale))
+                    .color(Vec4::new(0.0, 0.0, 0.0, 0.5))
+                    .order(order),
+            );
+            let mut quad = Quad::sprite(texture, center, box_size).order(order);
+            quad.uv = [
+                x / size[0],
+                y / size[1],
+                (x + w) / size[0],
+                (y + h) / size[1],
+            ];
+            quad.sampler = SamplerKind::NearestClamp;
+            canvas.draw(&quad);
+        }
+    }
     // A rectangle being drawn by hand, in the accent colour.
     if let Some((a, b)) = doc.drawing
         && let Some([x, y, w, h]) = doc.image.and_then(|(_, size)| pixel_rect(a, b, size))
@@ -375,6 +481,9 @@ mod tests {
                 slice("big", [0, 0, 48, 16]),
             ],
             clips: 0,
+            clip_list: Vec::new(),
+            clip_labels: Vec::new(),
+            clip: None,
             picked: Vec::new(),
             anchor: None,
             zoom: 6,
@@ -385,6 +494,34 @@ mod tests {
             last_press: None,
             pixels: None,
         }
+    }
+
+    /// A clip's preview plays its frames as the player does; its chip says what it is.
+    #[test]
+    fn a_clips_preview_follows_its_frames() {
+        use engine_scene::{SpriteClipImport, SpriteClipMode};
+        let swing = SpriteClipImport {
+            name: String::from("swing"),
+            first: 0,
+            last: 3,
+            durations: vec![0.5],
+            mode: SpriteClipMode::PingPong,
+            ..SpriteClipImport::default()
+        };
+        let at: Vec<u32> = [0.0, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05]
+            .iter()
+            .map(|&t| clip_frame(&swing, t))
+            .collect();
+        assert_eq!(at, [0, 0, 1, 2, 3, 2, 1, 0]);
+        let once = SpriteClipImport {
+            first: 5,
+            last: 4,
+            mode: SpriteClipMode::Once,
+            ..SpriteClipImport::default()
+        };
+        assert_eq!(clip_frame(&once, 0.05), 5);
+        assert_eq!(clip_frame(&once, 9.0), 4, "held at its end");
+        assert_eq!(clip_label(&swing), "swing 0\u{2013}3 · 100 ms · ping-pong");
     }
 
     /// A rectangle drawn by hand covers whole pixels, either way round, inside the image;
