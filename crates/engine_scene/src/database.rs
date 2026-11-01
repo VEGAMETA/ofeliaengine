@@ -85,6 +85,10 @@ pub struct SpriteImport {
     pub pivot: [f32; 2],
     /// How its pixels are sampled when drawn.
     pub filter: SpriteFilter,
+    /// Its slices (ADR 0125's E13-2): the named parts a sheet is cut into, in order. A
+    /// sprite shows one by its frame number (frame 0 the first), or by name as a part of
+    /// the image (`hero.png#run_3`); an image without slices is one frame, all of it.
+    pub slices: Vec<SliceImport>,
 }
 
 impl Default for SpriteImport {
@@ -93,11 +97,46 @@ impl Default for SpriteImport {
             pixels_per_unit: 16.0,
             pivot: [0.5, 0.5],
             filter: SpriteFilter::Nearest,
+            slices: Vec::new(),
+        }
+    }
+}
+
+/// A named rectangle of a sprite sheet (ADR 0125's E13-2): drawn as a sprite of its own,
+/// standing on its own pivot.
+#[derive(Debug, Clone, PartialEq, Reflect)]
+pub struct SliceImport {
+    /// Its name, unique in the image: how scenes name it as a part (`hero.png#run_3`).
+    pub name: String,
+    /// Its rectangle in pixels: left, top (from the image's top left), width, height.
+    pub rect: [u32; 4],
+    /// The point it stands on, as shares of its width and height from its bottom-left
+    /// corner (the image's pivot's rule).
+    pub pivot: [f32; 2],
+    /// Its nine-slice border in pixels: left, top, right, bottom (E13-2's sliced mode); 0
+    /// for none.
+    pub border: [u32; 4],
+}
+
+impl Default for SliceImport {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            rect: [0; 4],
+            pivot: [0.5, 0.5],
+            border: [0; 4],
         }
     }
 }
 
 impl SpriteImport {
+    /// The index of the slice part `part` names ([`AssetRef::part_hash`] of its name).
+    pub fn slice_of_part(&self, part: u64) -> Option<usize> {
+        self.slices
+            .iter()
+            .position(|s| crate::AssetRef::part_hash(&s.name) == part)
+    }
+
     /// The pixels a metre to draw with: [`Self::pixels_per_unit`], or 16 for one that is
     /// not a positive number.
     pub fn applied_pixels_per_unit(&self) -> f32 {
@@ -929,6 +968,40 @@ mod tests {
     /// What the database costs a project of 10,000 asset files in 100 folders: the first
     /// scan (each file read, a `.meta` written), the index written and read back, a scan of
     /// the unchanged project. Run with `--ignored --nocapture`.
+    /// A sheet's slices in its `.meta` (ADR 0125's E13-2): lines of the sprite section,
+    /// read back as written; a part names one by its name.
+    #[test]
+    fn slices_round_trip_and_are_found_by_part() {
+        let id = AssetId::new();
+        let mut meta = AssetMeta::default();
+        meta.sprite.slices.push(SliceImport {
+            name: String::from("run_0"),
+            rect: [16, 0, 16, 32],
+            pivot: [0.5, 0.0],
+            border: [0; 4],
+        });
+        meta.sprite.slices.push(SliceImport {
+            name: String::from("run_1"),
+            rect: [32, 0, 16, 32],
+            ..SliceImport::default()
+        });
+        let text = meta.to_text(id);
+        assert!(text.contains("sprite.slices.0.name = \"run_0\""), "{text}");
+        assert!(
+            text.contains("sprite.slices.0.rect = [16, 0, 16, 32]"),
+            "{text}"
+        );
+        let (read, _) = AssetMeta::parse(&text).unwrap();
+        assert_eq!(read, meta);
+        let part = crate::AssetRef::part(id, "run_1").part;
+        assert_eq!(read.sprite.slice_of_part(part), Some(1));
+        assert_eq!(
+            read.sprite
+                .slice_of_part(crate::AssetRef::part_hash("walk")),
+            None
+        );
+    }
+
     #[test]
     #[ignore = "a measurement"]
     fn measure_ten_thousand_assets() {
@@ -1129,6 +1202,7 @@ mod tests {
                 pixels_per_unit: 32.0,
                 pivot: [0.5, 0.0],
                 filter: SpriteFilter::Linear,
+                slices: Vec::new(),
             },
         };
         let text = meta.to_text(id);
