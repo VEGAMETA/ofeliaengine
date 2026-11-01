@@ -110,6 +110,12 @@ impl Graphs {
         self.generation
     }
 
+    /// Graph file `id` as read (or held by the editor), if it is (ADR 0125's E13-2e: a
+    /// sprite's graph is cooked from it against its image's clips).
+    pub(crate) fn file(&self, id: AssetId) -> Option<Arc<GraphFile>> {
+        self.files.get(&id)?.as_ref().map(Arc::clone)
+    }
+
     /// Graph file `id`, read from `path` the first time it is asked for (a file that cannot
     /// be read is told once, then is none until it changes).
     pub(crate) fn read(
