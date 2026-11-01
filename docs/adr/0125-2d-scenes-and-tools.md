@@ -969,3 +969,17 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c-6 and later):** a clip's frame time, mode and frames edited in the tab,
   pivots dragged, nine-slice borders; graphs of sprite clips; Aseprite files; sliced and
   tiled modes; renames followed in scenes not open.
+
+## As built (E13-2c-6, 2026-11-01): clips' timing and modes, pivots dragged
+
+- **Image: Clip Frame Time…** (42, 50, 67, 80, 100, 125, 150, 200 ms; the per-frame
+  durations cleared) and **Image: Clip Mode…** (loop, once, ping-pong) set the chosen
+  clip's, one undo step each, its preview starting again.
+- **Pivots dragged:** with one slice picked, a press within 6 screen pixels of its pivot
+  cross drags it, snapped to pixels' corners and centres inside the slice
+  (`SheetDoc::pivot_at`), shown as it moves; the release writes it, one undo step.
+- Tests: the chosen clip's frame time and mode set (its chip follows); pivot positions
+  and snapping, kept inside the slice.
+- **Left (E13-2c-7 and later):** a clip's frames changed in the tab, nine-slice borders
+  (with the sliced mode); graphs of sprite clips; Aseprite files; sliced and tiled modes;
+  renames followed in scenes not open.

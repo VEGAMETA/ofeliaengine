@@ -1265,6 +1265,8 @@ struct CommandIds {
     slice_grid: CommandId,
     slice_islands: CommandId,
     slice_pivot: CommandId,
+    clip_time: CommandId,
+    clip_mode: CommandId,
     make_variant: CommandId,
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
@@ -1524,6 +1526,8 @@ fn commands() -> (Commands, CommandIds) {
         slice_grid: c.register("image.slice_grid", "Image", "Slice by Grid…"),
         slice_islands: c.register("image.slice_islands", "Image", "Slice by Islands"),
         slice_pivot: c.register("image.slice_pivot", "Image", "Slice Pivot…"),
+        clip_time: c.register("image.clip_time", "Image", "Clip Frame Time…"),
+        clip_mode: c.register("image.clip_mode", "Image", "Clip Mode…"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -2567,6 +2571,10 @@ enum Pick {
     SliceGrid(u32),
     /// Sets the picked slices' pivot to this preset (E13-2c-3).
     SlicePivot(usize),
+    /// Sets the chosen clip's frame time, in milliseconds (E13-2c-6).
+    ClipTime(u32),
+    /// Sets the chosen clip's mode (E13-2c-6).
+    ClipMode(engine_scene::SpriteClipMode),
     /// Keeps a change made while playing, or not (E3-3).
     Keep(KeepItem),
     /// Shows this asset in the FileSystem dock.
@@ -9794,6 +9802,13 @@ impl Editor {
                             Pick::Step(k, value) => self.set_step(world, k, value),
                             Pick::SliceGrid(cell) => self.slice_image(world, Some(cell)),
                             Pick::SlicePivot(k) => self.set_slice_pivot(world, k),
+                            Pick::ClipTime(ms) => self.set_clip(world, "Clip Frame Time", |c| {
+                                c.frame_time = ms as f32 / 1000.0;
+                                c.durations.clear();
+                            }),
+                            Pick::ClipMode(mode) => {
+                                self.set_clip(world, "Clip Mode", |c| c.mode = mode);
+                            }
                             Pick::Keep(item) => self.toggle_keep(world, item),
                             Pick::Reveal(id) => self.reveal_asset(id),
                             Pick::Component { name, .. } => self.add_component(world, &name),
@@ -14677,7 +14692,17 @@ impl Editor {
                 let [dx, dy] = self.input.drag();
                 doc.pan([dx / scale, dy / scale]);
             }
-            if self.input.pressed(Button::Left) {
+            // The picked slice's pivot cross, within 6 screen pixels: dragged (E13-2c-6).
+            let near_pivot = match doc.picked.as_slice() {
+                [k] => doc.pivot_point(*k).is_some_and(|q| {
+                    let z = doc.zoom();
+                    ((q[0] - p[0]) * z).hypot((q[1] - p[1]) * z) <= 6.0
+                }),
+                _ => false,
+            };
+            if self.input.pressed(Button::Left) && near_pivot && !shift && !ctrl {
+                doc.pivot_drag = doc.picked.first().copied();
+            } else if self.input.pressed(Button::Left) {
                 let hit = doc.slice_at(p);
                 doc.click(hit, shift, ctrl);
                 // On nothing: a rectangle drawn by hand from there (E13-2c-3), or a second
@@ -14711,6 +14736,28 @@ impl Editor {
                     new_slice = Some(SheetSlice::Rect(rect));
                 }
             }
+        }
+        // A pivot being dragged follows the pointer; its release writes it, one step.
+        let mut pivot_done = None;
+        if let Some(s) = doc.pivot_drag {
+            if let Some(at) = cursor {
+                let p = doc.image_point(at, [x, y], [w, h]);
+                if let (Some(pivot), Some(slice)) = (doc.pivot_at(s, p), doc.slices.get_mut(s)) {
+                    slice.pivot = pivot;
+                }
+            }
+            if !self.input.held(Button::Left) {
+                doc.pivot_drag = None;
+                pivot_done = doc.slices.get(s).map(|slice| (s, slice.pivot));
+            }
+        }
+        if let Some((s, pivot)) = pivot_done {
+            let (id, path) = (self.sheets[k].id, self.sheets[k].path.clone());
+            self.edit_image_meta(world, id, &path, "Slice Pivot", |meta| {
+                if let Some(slice) = meta.sprite.slices.get_mut(s) {
+                    slice.pivot = pivot;
+                }
+            });
         }
         if let Some(how) = new_slice {
             self.add_slice(world, k, how);
@@ -14907,6 +14954,79 @@ impl Editor {
             }
         });
         self.say(format!("{path}: clip {name} deleted"));
+    }
+
+    /// "Image: Clip Frame Time…" and "Image: Clip Mode…" (E13-2c-6): their choices in the
+    /// palette, for the clip chosen in the image tab shown.
+    fn pick_clip_setting(&mut self, world: &mut World, time: bool) {
+        let chosen = self
+            .active_sheet
+            .and_then(|k| self.sheets.get(k))
+            .and_then(|d| d.clip.and_then(|(c, _)| d.clip_list.get(c)))
+            .map(|c| (c.frame_time, c.mode));
+        let Some((now_time, now_mode)) = chosen else {
+            self.say(String::from("Choose a clip in an image's tab first"));
+            return;
+        };
+        let items = if time {
+            CLIP_TIMES
+                .iter()
+                .map(|&ms| Choice {
+                    label: format!("{ms} ms ({:.1} frames a second)", 1000.0 / ms as f32),
+                    detail: String::from(if (now_time * 1000.0).round() as u32 == ms {
+                        "now"
+                    } else {
+                        ""
+                    }),
+                    pick: Pick::ClipTime(ms),
+                })
+                .collect()
+        } else {
+            use engine_scene::SpriteClipMode as M;
+            [
+                (M::Loop, "Loop: round and round"),
+                (M::Once, "Once: holds its last frame"),
+                (M::PingPong, "Ping-Pong: forth and back"),
+            ]
+            .into_iter()
+            .map(|(mode, label)| Choice {
+                label: String::from(label),
+                detail: String::from(if mode == now_mode { "now" } else { "" }),
+                pick: Pick::ClipMode(mode),
+            })
+            .collect()
+        };
+        let hint = if time {
+            "The clip's frame time"
+        } else {
+            "How the clip plays"
+        };
+        self.open_list(world, hint, items);
+    }
+
+    /// The clip chosen in the image tab shown changed by `edit`, as undo step `name`; its
+    /// preview starts again.
+    fn set_clip(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        edit: impl FnOnce(&mut engine_scene::SpriteClipImport),
+    ) {
+        let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get(k)) else {
+            return;
+        };
+        let Some((c, _)) = doc.clip else {
+            return;
+        };
+        let (id, path) = (doc.id, doc.path.clone());
+        self.edit_image_meta(world, id, &path, name, |meta| {
+            if let Some(clip) = meta.sprite.clips.get_mut(c) {
+                edit(clip);
+            }
+        });
+        if let Some(doc) = self.active_sheet.and_then(|k| self.sheets.get_mut(k)) {
+            doc.clip = doc.clip.map(|(c, _)| (c, Instant::now()));
+        }
     }
 
     /// "Image: Slice Pivot…" (E13-2c-3): the presets in the palette, for the picked slices
@@ -20011,6 +20131,8 @@ impl Editor {
             self.slice_image(world, None);
         } else if id == ids.slice_pivot {
             self.pick_slice_pivot(world);
+        } else if id == ids.clip_time || id == ids.clip_mode {
+            self.pick_clip_setting(world, id == ids.clip_time);
         } else if id == ids.actual_size {
             if self.orbit.flat.is_some() {
                 let height = self.view_rect.map_or(720.0, |r| r[3] as f32);
@@ -33831,6 +33953,9 @@ enum SheetSlice {
     Fit([i64; 2]),
 }
 
+/// The frame times "Image: Clip Frame Time…" offers (E13-2c-6), in milliseconds.
+const CLIP_TIMES: [u32; 8] = [42, 50, 67, 80, 100, 125, 150, 200];
+
 /// The cell sizes "Image: Slice by Grid…" offers (E13-2c), in pixels.
 const SLICE_CELLS: [u32; 7] = [8, 16, 24, 32, 48, 64, 128];
 
@@ -35115,6 +35240,16 @@ mod tests {
         let undo = ed.ids.undo;
         ed.run(&mut world, undo);
         assert_eq!(ed.sheets[0].clip_list[0].name, "run");
+        // Its frame time and mode (E13-2c-6).
+        ed.sheets[0].clip = Some((0, Instant::now()));
+        ed.set_clip(&mut world, "Clip Frame Time", |c| c.frame_time = 0.08);
+        ed.set_clip(&mut world, "Clip Mode", |c| {
+            c.mode = engine_scene::SpriteClipMode::PingPong;
+        });
+        assert_eq!(
+            ed.sheets[0].clip_labels,
+            ["run 0\u{2013}3 · 80 ms · ping-pong"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
