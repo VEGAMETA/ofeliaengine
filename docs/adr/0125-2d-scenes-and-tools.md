@@ -865,3 +865,25 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c and later):** the image's tab (slicing by grid, islands and hand,
   names, pivots, borders, re-slicing that keeps names; clips edited and previewed);
   graphs whose states play sprite clips; Aseprite files; sliced and tiled modes.
+
+## As built (E13-2c-1, 2026-11-01): slicing
+
+- **`engine_assets::slicing`:** `grid_rects` (cells by size, margin and gap, or by count;
+  cells without a visible pixel left out when the pixels are given), `island_rects`
+  (8-connected islands of visible pixels, their rectangles in reading order: rows of
+  overlapping heights from the top, each from the left; a minimum size), `fit_rect`
+  (the island under a pixel, for a double-click), `reslice` (a cut again keeps the
+  name, pivot and border of a slice whose rectangle stays or overlaps a new one by more
+  than half of the larger; new slices named `{prefix}_{n}` with the free numbers).
+- **The editor:** **Image: Slice by Grid…** (square cells, 8 to 128 pixels, from the
+  palette) and **Image: Slice by Islands** (islands of 2 pixels and more) slice the image
+  picked in the FileSystem dock: its `.meta` read, sliced again with `reslice` (named
+  after the file), written, one undo step (the `.meta`'s text in the step, written back
+  by undo and redo), the player's sprites of the image made again.
+- Tests: grids (size, margin, gap, count, empty cells), islands (corners join, tiny ones
+  left out, reading order, the fit under a pixel), reslicing (kept by rectangle and by
+  overlap, pivots and borders kept, free names); the editor slicing a sheet by grid then
+  islands, names kept, undone.
+- **Left (E13-2c-2 and later):** the image's tab itself (the sheet at whole-number zooms
+  with its slices, slicing by hand, pivots and borders, picking frames, Make Clip);
+  graphs of sprite clips; Aseprite files; sliced and tiled modes.
