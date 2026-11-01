@@ -89,6 +89,9 @@ pub struct SpriteImport {
     /// sprite shows one by its frame number (frame 0 the first), or by name as a part of
     /// the image (`hero.png#run_3`); an image without slices is one frame, all of it.
     pub slices: Vec<SliceImport>,
+    /// Its clips (ADR 0125's E13-2, question 6: a): runs of its frames an `Animator` plays
+    /// by name, as it plays a model's clips.
+    pub clips: Vec<SpriteClipImport>,
 }
 
 impl Default for SpriteImport {
@@ -98,8 +101,57 @@ impl Default for SpriteImport {
             pivot: [0.5, 0.5],
             filter: SpriteFilter::Nearest,
             slices: Vec::new(),
+            clips: Vec::new(),
         }
     }
+}
+
+/// A flipbook of a sheet (ADR 0125's E13-2): a run of its frames, each shown for a while.
+#[derive(Debug, Clone, PartialEq, Reflect)]
+pub struct SpriteClipImport {
+    /// Its name: what `Animator.clip` and `animator:play` name.
+    pub name: String,
+    /// Its first frame (the sheet's slice of that number).
+    pub first: u32,
+    /// Its last frame; a last below the first runs backwards.
+    pub last: u32,
+    /// Seconds each frame shows (0.1: ten frames a second).
+    #[reflect(min = 0.001, max = 60.0)]
+    pub frame_time: f32,
+    /// Seconds for each frame of the run in turn, where they differ (an Aseprite file's
+    /// durations); a frame past the list shows for `frame_time`.
+    pub durations: Vec<f32>,
+    /// How it plays: round and round, once (holding its last frame), or forth and back.
+    pub mode: SpriteClipMode,
+    /// Its events (seconds into it), as a model's clips have them.
+    pub events: Vec<ClipEvent>,
+}
+
+impl Default for SpriteClipImport {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            first: 0,
+            last: 0,
+            frame_time: 0.1,
+            durations: Vec::new(),
+            mode: SpriteClipMode::Loop,
+            events: Vec::new(),
+        }
+    }
+}
+
+/// How a sprite clip plays (ADR 0125's E13-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
+pub enum SpriteClipMode {
+    /// Round and round.
+    #[default]
+    Loop,
+    /// Once, holding its last frame.
+    Once,
+    /// Forth and back, round and round (its ends shown once each pass).
+    PingPong,
 }
 
 /// A named rectangle of a sprite sheet (ADR 0125's E13-2): drawn as a sprite of its own,
@@ -1203,6 +1255,7 @@ mod tests {
                 pivot: [0.5, 0.0],
                 filter: SpriteFilter::Linear,
                 slices: Vec::new(),
+                clips: Vec::new(),
             },
         };
         let text = meta.to_text(id);

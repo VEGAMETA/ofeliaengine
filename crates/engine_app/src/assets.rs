@@ -887,7 +887,12 @@ pub struct Assets {
     /// asset.
     sprite_images: Vec<SpriteImageState>,
     sprite_slots: HashMap<AssetRef, u32>,
+    /// The animators of sprites (E13-2) and the tick's list of them, kept.
+    sprite_animators: Option<SpriteAnimators>,
+    sprite_work: Vec<(Entity, AssetRef)>,
 }
+
+type SpriteAnimators = QueryState<(Entity, &'static Animator, &'static crate::Sprite)>;
 
 /// A sprite's image (ADR 0125): its texture's key, its `.meta`'s sprite settings, and what
 /// a frame draws of it.
@@ -898,6 +903,8 @@ struct SpriteImageState {
     /// Its frames (E13-2): its `.meta`'s slices (the one its part names, for a part), in
     /// pixels; none: the whole image, one frame.
     frames: Vec<SpriteFrame>,
+    /// Its clips (E13-2): the `.meta`'s, played by animators of sprites showing the image.
+    clips: Vec<SpriteClip>,
     /// No path is known for it (said once): never drawn.
     lost: bool,
     /// This frame's: its settings with its texture's bindless index and size, once made.
@@ -916,6 +923,59 @@ pub(crate) struct SpriteImage {
     /// The part of the texture drawn: min u, min v, max u, max v (the image's top at v 0);
     /// a frame's slice (E13-2), else all of it.
     pub(crate) uv: [f32; 4],
+}
+
+/// A sprite clip laid out to play (ADR 0125's E13-2): the moment each of its frames
+/// starts, the frame, its length, and its events.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SpriteClip {
+    pub(crate) name: Box<str>,
+    starts: Box<[f32]>,
+    frames: Box<[u32]>,
+    pub(crate) length: f32,
+    pub(crate) once: bool,
+    pub(crate) events: Vec<crate::clip_events::EventDef>,
+}
+
+impl SpriteClip {
+    /// Clip `clip` of a `.meta`: its run of frames (ping-pong's way back too) with their
+    /// times.
+    pub(crate) fn new(clip: &engine_scene::SpriteClipImport) -> Self {
+        let run: Vec<u32> = if clip.last >= clip.first {
+            (clip.first..=clip.last).collect()
+        } else {
+            (clip.last..=clip.first).rev().collect()
+        };
+        let time_of = |k: usize| {
+            let t = clip.durations.get(k).copied().unwrap_or(clip.frame_time);
+            if t.is_finite() && t > 0.0 { t } else { 0.1 }
+        };
+        // The run's places in order: forth, and for ping-pong back without its ends.
+        let mut places: Vec<usize> = (0..run.len()).collect();
+        if clip.mode == engine_scene::SpriteClipMode::PingPong && run.len() > 2 {
+            places.extend((1..run.len() - 1).rev());
+        }
+        let mut starts = Vec::with_capacity(places.len());
+        let mut at = 0.0;
+        for &k in &places {
+            starts.push(at);
+            at += time_of(k);
+        }
+        Self {
+            name: Box::from(clip.name.as_str()),
+            starts: starts.into_boxed_slice(),
+            frames: places.iter().map(|&k| run[k]).collect(),
+            length: at,
+            once: clip.mode == engine_scene::SpriteClipMode::Once,
+            events: crate::clip_events::event_defs(&clip.events),
+        }
+    }
+
+    /// The frame shown `t` seconds in (the last from its end on).
+    pub(crate) fn frame_at(&self, t: f32) -> u32 {
+        let k = self.starts.partition_point(|&s| s <= t).max(1) - 1;
+        self.frames.get(k).copied().unwrap_or(0)
+    }
 }
 
 /// A frame of a sprite image (ADR 0125's E13-2): a slice's rectangle in pixels (left, top,
@@ -961,12 +1021,13 @@ impl Assets {
                 asset.file
             );
         }
-        let (settings, frames) = self.sprite_settings(asset);
+        let (settings, frames, clips) = self.sprite_settings(asset);
         self.sprite_images.push(SpriteImageState {
             asset,
             key: TextureKey::new(asset.file, 0, TextureUsage::Color),
             settings,
             frames,
+            clips,
             lost,
             shown: None,
         });
@@ -977,7 +1038,7 @@ impl Assets {
 
     /// Image `asset`'s sprite settings from its file's `.meta` (the defaults without one),
     /// with no texture yet, and its frames: the slices, or the one slice its part names.
-    fn sprite_settings(&self, asset: AssetRef) -> (SpriteImage, Vec<SpriteFrame>) {
+    fn sprite_settings(&self, asset: AssetRef) -> (SpriteImage, Vec<SpriteFrame>, Vec<SpriteClip>) {
         let meta = self
             .paths
             .get(AssetRef::file(asset.file))
@@ -1013,7 +1074,70 @@ impl Assets {
             },
             uv: SpriteImage::ALL,
         };
-        (settings, frames)
+        // A part is one slice: no clips.
+        let clips = if asset.part == 0 {
+            meta.clips.iter().map(SpriteClip::new).collect()
+        } else {
+            Vec::new()
+        };
+        (settings, frames, clips)
+    }
+
+    /// One tick of the animators of sprites (ADR 0125's E13-2, after the animators moved
+    /// on): an animator whose clip is one of its sprite's image's (not among its own
+    /// `.anim` clips, not a graph) shows the clip's frame at its time, learns the clip's
+    /// length and whether it holds, and fires the events its tick passed. Writes only what
+    /// changed; allocates nothing once its vectors have grown.
+    pub(crate) fn animate_sprites(&mut self, world: &mut World) {
+        let query = self
+            .sprite_animators
+            .get_or_insert_with(|| QueryState::new(world));
+        let mut work = core::mem::take(&mut self.sprite_work);
+        work.clear();
+        query.for_each_readonly(world, |(e, animator, sprite)| {
+            if sprite.image.is_none()
+                || sprite.image.part != 0
+                || animator.plays_graph()
+                || animator.clips.contains_key(&animator.clip)
+            {
+                return;
+            }
+            work.push((e, sprite.image));
+        });
+        for &(e, image) in &work {
+            let slot = self.sprite_slot(image) as usize;
+            let Some(animator) = world.get::<Animator>(e) else {
+                continue;
+            };
+            let clips = &self.sprite_images[slot].clips;
+            // By name; empty or a name it lacks: the first, as a model's clips go.
+            let Some(clip) = clips
+                .iter()
+                .find(|c| *c.name == *animator.clip)
+                .or_else(|| clips.first())
+            else {
+                continue;
+            };
+            let frame = clip.frame_at(animator.time);
+            let (from, to) = (animator.previous, animator.time);
+            let told = animator.length == clip.length && animator.hold == clip.once;
+            let fired = &mut self.fields.fired;
+            crossed(&clip.events, clip.length, from, to, |event| {
+                fired.push((e, event.clone()));
+            });
+            if !told && let Some(animator) = world.get_mut::<Animator>(e) {
+                animator.length = clip.length;
+                animator.hold = clip.once;
+            }
+            if world
+                .get::<crate::Sprite>(e)
+                .is_some_and(|s| s.frame != frame)
+                && let Some(sprite) = world.get_mut::<crate::Sprite>(e)
+            {
+                sprite.frame = frame;
+            }
+        }
+        self.sprite_work = work;
     }
 
     /// Gives the loader sprite image `slot`'s texture, unless it is made or being made.
@@ -1520,6 +1644,8 @@ impl Assets {
             held_params: Vec::new(),
             sprite_images: Vec::new(),
             sprite_slots: HashMap::new(),
+            sprite_animators: None,
+            sprite_work: Vec::new(),
         }
     }
 
@@ -1723,9 +1849,10 @@ impl Assets {
         for slot in 0..self.sprite_images.len() {
             if self.sprite_images[slot].asset.file == file {
                 let asset = self.sprite_images[slot].asset;
-                let (settings, frames) = self.sprite_settings(asset);
+                let (settings, frames, clips) = self.sprite_settings(asset);
                 self.sprite_images[slot].settings = settings;
                 self.sprite_images[slot].frames = frames;
+                self.sprite_images[slot].clips = clips;
                 self.load_sprite_image(slot);
             }
         }
@@ -4381,6 +4508,51 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// A sprite clip's frames and times (ADR 0125's E13-2): forth, backwards, ping-pong
+    /// without doubled ends, its own durations, and its last frame from its end on.
+    #[test]
+    fn sprite_clips_lay_out_their_frames() {
+        use engine_scene::{SpriteClipImport, SpriteClipMode};
+        let run = SpriteClip::new(&SpriteClipImport {
+            name: String::from("run"),
+            first: 4,
+            last: 6,
+            frame_time: 0.1,
+            ..SpriteClipImport::default()
+        });
+        assert!((run.length - 0.3).abs() < 1e-6);
+        let at = |c: &SpriteClip, ts: &[f32]| ts.iter().map(|&t| c.frame_at(t)).collect::<Vec<_>>();
+        assert_eq!(
+            at(&run, &[0.0, 0.05, 0.1, 0.25, 0.31, 9.0]),
+            [4, 4, 5, 6, 6, 6]
+        );
+        let back = SpriteClip::new(&SpriteClipImport {
+            first: 2,
+            last: 0,
+            ..SpriteClipImport::default()
+        });
+        assert_eq!(at(&back, &[0.0, 0.1, 0.2]), [2, 1, 0]);
+        let swing = SpriteClip::new(&SpriteClipImport {
+            first: 0,
+            last: 3,
+            durations: vec![0.5],
+            mode: SpriteClipMode::PingPong,
+            ..SpriteClipImport::default()
+        });
+        // 0 1 2 3 2 1: the first for half a second, the rest a tenth each.
+        assert!((swing.length - 1.0).abs() < 1e-6);
+        assert_eq!(
+            at(&swing, &[0.0, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]),
+            [0, 0, 1, 2, 3, 2, 1]
+        );
+        assert!(!swing.once);
+        let once = SpriteClip::new(&SpriteClipImport {
+            mode: SpriteClipMode::Once,
+            ..SpriteClipImport::default()
+        });
+        assert!(once.once && (once.length - 0.1).abs() < 1e-6);
+    }
 
     /// ADR 0124's E12-2a: an animator names its clip as the file does, an unnamed one as
     /// the editor shows it; any other name plays the first.

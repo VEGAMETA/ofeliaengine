@@ -82,7 +82,8 @@ pub use anim::{
 pub use assets::{AssetId, AssetPaths, AssetRef};
 pub use database::{
     AssetDatabase, AssetEntry, AssetKind, AssetMeta, ClipEvent, ClipImport, ModelImport,
-    ScanReport, SliceImport, SpriteFilter, SpriteImport, TextureCompression, TextureImport,
+    ScanReport, SliceImport, SpriteClipImport, SpriteClipMode, SpriteFilter, SpriteImport,
+    TextureCompression, TextureImport,
 };
 pub use prefab::{KeptBlocks, PrefabFiles, PrefabInstance, PrefabPart, Prefabs};
 

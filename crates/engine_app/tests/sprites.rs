@@ -10,8 +10,10 @@ use engine_app::{
 };
 use engine_core::math::{Vec2, Vec3};
 use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, bytemuck, pod_component};
-use engine_runtime::Camera;
-use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, SliceImport, SpriteImport};
+use engine_runtime::{Animator, Camera};
+use engine_scene::{
+    AssetId, AssetMeta, AssetPaths, AssetRef, SliceImport, SpriteClipImport, SpriteImport,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -276,6 +278,74 @@ fn a_sheets_slices_are_drawn_by_frame_and_by_name() {
         player.sprite_at(Vec2::new(2.3, 0.3), |_, _| true),
         Some(named)
     );
+    assert_valid(&player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sheet's clip played by an `Animator` (ADR 0125's E13-2): the sprite's frame follows
+/// the clip's time, the animator learns its length and wraps there.
+#[test]
+fn an_animator_plays_a_sheets_clip() {
+    let sheet = image(32, 16, |x, _| {
+        if x < 16 {
+            [255, 0, 0, 255]
+        } else {
+            [0, 255, 0, 255]
+        }
+    });
+    let slice = |name: &str, x: u32| SliceImport {
+        name: String::from(name),
+        rect: [x, 0, 16, 16],
+        ..SliceImport::default()
+    };
+    let import = SpriteImport {
+        slices: vec![slice("red", 0), slice("green", 16)],
+        clips: vec![SpriteClipImport {
+            name: String::from("blink"),
+            first: 0,
+            last: 1,
+            frame_time: 0.25,
+            ..SpriteClipImport::default()
+        }],
+        ..SpriteImport::default()
+    };
+    let (dir, paths, ids) = project("clip", &[("sheet.png", sheet, import)]);
+    let Some(mut player) = player(&dir, &paths) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let world = player.world_mut();
+    camera(world);
+    let blinker = world.spawn((
+        Transform::IDENTITY,
+        GlobalTransform::IDENTITY,
+        Sprite::new(AssetRef::file(ids[0])),
+        Animator::new("blink"),
+    ));
+    let mut game = Slides(None);
+    // A second at 60 frames a second: each frame's (clip time, sprite frame).
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        player.frame(&mut game).unwrap();
+        let world = player.world_mut();
+        let animator = world.get::<Animator>(blinker).unwrap();
+        let (time, length) = (animator.time, animator.length);
+        let frame = world.get::<Sprite>(blinker).unwrap().frame;
+        seen.push((time, length, frame));
+    }
+    let (_, length, _) = *seen.last().unwrap();
+    assert!(
+        (length - 0.5).abs() < 1e-6,
+        "the clip's length told: {length}"
+    );
+    // Once the length is known, the frame is the clip's at the animator's time.
+    let told = seen.iter().position(|s| s.1 > 0.0).unwrap();
+    for &(time, _, frame) in &seen[told + 1..] {
+        let want = u32::from(time.rem_euclid(0.5) >= 0.25);
+        assert!(time < 0.5 + 1e-4, "wrapped: {time}");
+        assert_eq!(frame, want, "at {time}: {seen:?}");
+    }
+    assert!(seen.iter().any(|s| s.2 == 0) && seen.iter().any(|s| s.2 == 1));
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
 }
