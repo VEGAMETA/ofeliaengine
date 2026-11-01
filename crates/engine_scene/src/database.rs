@@ -434,10 +434,13 @@ pub enum AssetKind {
     /// An animation graph (`.agraph`): what plays a character's clips as its parameters
     /// say (ADR 0124's E12-5).
     AnimGraph,
+    /// A tile set (`.tileset`): the images a tile map's tiles come from, and what each
+    /// tile adds (ADR 0125's E13-3).
+    TileSet,
 }
 
 /// Every kind with its name and extensions.
-const KINDS: [(AssetKind, &str, &[&str]); 14] = [
+const KINDS: [(AssetKind, &str, &[&str]); 15] = [
     (AssetKind::Scene, "scene", &["scene"]),
     (AssetKind::Material, "material", &["material"]),
     (AssetKind::Model, "model", &["glb", "gltf"]),
@@ -458,6 +461,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 14] = [
     (AssetKind::Function, "function", &["mfunc"]),
     (AssetKind::Anim, "animation", &["anim"]),
     (AssetKind::AnimGraph, "animation graph", &["agraph"]),
+    (AssetKind::TileSet, "tile set", &["tileset"]),
 ];
 
 impl AssetKind {

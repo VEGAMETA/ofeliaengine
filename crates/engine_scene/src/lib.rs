@@ -70,6 +70,7 @@ mod assets;
 pub mod database;
 pub mod prefab;
 pub mod text;
+mod tileset;
 
 pub use agraph::{
     AnimGraphFile, BlendPoint, LayerBlend, LayerFile, NodeFile, NodeKind, ParamFile, ParamKind,
@@ -86,6 +87,7 @@ pub use database::{
     TextureCompression, TextureImport,
 };
 pub use prefab::{KeptBlocks, PrefabFiles, PrefabInstance, PrefabPart, Prefabs};
+pub use tileset::{Terrain, TerrainMode, TileDef, TileGrid, TileName, TileSetFile, TileSource};
 
 use engine_ecs::reflected::WriteDefault;
 use engine_ecs::{

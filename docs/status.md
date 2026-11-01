@@ -883,6 +883,9 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E13-3a, tile sets and tile maps as data** (#PR): `.tileset` (`TileSetFile`),
+    `TileMap` with its cells in the scene by chunk rows through a hashed palette with
+    runs; a 256 × 256 layer is 40 KB as a level, 359 KB at worst, read in 1–4 ms.
   - **E13-2f, Aseprite files** (#526): `.aseprite`/`.ase` read by our own parser; frames
     drawn as a sheet, tags as clips, slices, cel events; the `.meta` keeps what the
     editor adds.

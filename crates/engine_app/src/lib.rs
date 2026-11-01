@@ -89,6 +89,7 @@ mod skins;
 mod sound;
 mod sprites;
 mod text;
+pub mod tilemap;
 mod videos;
 
 pub use assets::{
@@ -139,6 +140,7 @@ pub use sound::{
 };
 pub use sprites::{SORTING_FILE_EXTENSION, SortGroup, SortingFile, SortingLayer, Sprite};
 pub use text::TextSource;
+pub use tilemap::TileMap;
 
 /// The mixer's built-in effects as files and the editor name them (ADR 0121): each kind,
 /// its parameters with their ranges, defaults and units.
