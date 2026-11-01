@@ -915,3 +915,23 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2c-3 and later):** slicing by hand (drag a rectangle, a double click
   fitting it), renaming, pivot presets and dragging, nine-slice borders, the clips'
   list with a preview; graphs of sprite clips; Aseprite files; sliced and tiled modes.
+
+## As built (E13-2c-3, 2026-11-01): slices by hand and pivots
+
+- **Drawn by hand:** a press on the sheet where no slice is starts a rectangle (drawn in
+  the accent colour over the sheet); its release adds a slice of the whole pixels it
+  covers, clamped to the image (`sheet::pixel_rect`; one pixel or less is no slice),
+  named after the file with the lowest free number (`sheet::free_name`), standing on the
+  image's pivot, picked.
+- **Fitted:** a second press within 0.45 s on the same pixel fits a slice to the island
+  of drawn pixels there (`slicing::fit_rect` on the image's pixels, read from its file
+  the first time); on a clear pixel nothing is added and the status line says so.
+- **Pivots:** **Image: Slice Pivot…** offers nine presets (centre, feet, top, the sides'
+  middles, the corners) for the picked slices of the tab shown.
+- Each is one undo step through `edit_image_meta`. Tests: whole-pixel rectangles either
+  way round, clamped, free names; the editor adding a drawn and a fitted slice (and none
+  on a clear pixel), a pivot preset on two, undone; on a player, a rectangle dragged
+  from outside the sheet into it making a third slice at its top left, picked.
+- **Left (E13-2c-4 and later):** renaming slices and clips, pivots dragged, nine-slice
+  borders, the clips' list with a preview; graphs of sprite clips; Aseprite files;
+  sliced and tiled modes.

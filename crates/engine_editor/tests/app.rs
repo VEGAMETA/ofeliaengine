@@ -2052,6 +2052,47 @@ fn an_images_tab_draws_its_sheet_and_picks_a_slice() {
     let (slices, picked, status) = game.image_tab().expect("its tab shows");
     assert_eq!((slices, picked), (2, vec![1]), "{status}");
     assert!(status.contains("right (frame 1)"), "{status}");
+    // A rectangle drawn by hand (E13-2c-3) from above the sheet's top left, where no slice
+    // is, into it: a third slice of whole pixels, picked.
+    let first = rgba
+        .chunks_exact(4)
+        .position(|p| p[..3] == [255, 0, 0] || p[..3] == [0, 255, 0])
+        .unwrap() as u32;
+    let (sx, sy) = (first % width, first / width);
+    let mouse = |game: &mut EditorGame<NoGame>, at: (u32, u32)| {
+        send(
+            game,
+            WindowEventKind::CursorMoved {
+                x: at.0 as i32,
+                y: at.1 as i32,
+            },
+        );
+    };
+    mouse(&mut game, (sx - 30, sy - 30));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    send(
+        &mut game,
+        WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    editor_frame(&mut player, &mut game, &mut overlay);
+    mouse(&mut game, (sx + 40, sy + 40));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    send(
+        &mut game,
+        WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let (slices, picked, status) = game.image_tab().expect("its tab shows");
+    assert_eq!((slices, picked), (3, vec![2]), "{status}");
+    assert!(status.contains("sheet_0 (frame 2) 0, 0"), "{status}");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

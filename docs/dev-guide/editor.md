@@ -1818,7 +1818,11 @@ pointer, a middle or right drag pans, **F** frames the sheet. Click a slice to p
 says its name, frame number and rectangle. **M** makes a clip of the picked frames (the
 run from the lowest to the highest, named `clip_0`, `clip_1`, …, a tenth of a second a
 frame, looping): play it with `Animator::new("clip_0")`. **Delete** takes the picked
-slices away. Each is one undo step; Escape lets go of the picks, Ctrl+W closes the tab.
+slices away. Drag on the sheet where there is no slice to draw one by hand (whole
+pixels; it is named after the file and picked), or double-click a drawing to fit a slice
+around it. **Image: Slice Pivot…** sets the picked slices' pivot from nine presets (the
+centre, the feet, the corners, the edges' middles). Each is one undo step; Escape lets go
+of the picks, Ctrl+W closes the tab.
 Slice the sheet with **Image: Slice by Grid…** or **Image: Slice by Islands** (see the 2D
 guide).
 
