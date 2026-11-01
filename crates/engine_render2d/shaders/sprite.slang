@@ -15,6 +15,8 @@ static const uint NO_TEXTURE = 0xFFFFFFFFu;
 static const uint FLAG_SAMPLER_MASK = 0x7u; // bits 0-2: bindless sampler index
 static const uint FLAG_SDF = 0x8u;          // bit 3: shape with an antialiased SDF edge
 static const uint FLAG_ADDITIVE = 0x10u;    // bit 4: output alpha 0 (adds under premultiplied blending)
+static const uint FLAG_TILES = 0x20u;       // bit 5: a tile chunk (fragmentTiles): `texture` and
+                                            // bits 16-31 its record's address
                                             // bits 16-31: f16 outline thickness (0 = filled)
 
 struct Instance
@@ -178,6 +180,68 @@ float4 shade(VertexOut input)
 float4 fragmentMain(VertexOut input) : SV_Target0
 {
     return shade(input);
+}
+
+// A tile chunk of a flat tile layer (ADR 0125's E13-3b): one quad over 32 × 32 cells, `uv`
+// the cell coordinate (x right, y up). The chunk's record (its address in `texture` and the
+// flags' top 16 bits) holds the table's offset from it, 3 spare words, then the cells row by
+// row from the bottom: 0 empty, else a tile of the table plus one (20 bits) and its
+// orientation above (1 flip x, 2 flip y, 4 transpose). The table gives each tile its image
+// and region; sampled with the gradients of the continuous cell coordinate, so the mip level
+// does not jump at tile borders.
+struct TileEntry
+{
+    float4 uv;      // min.xy, max.xy; the tile's top at min v
+    uint texture;   // bindless sampled-image index or NO_TEXTURE
+    uint sampler;
+    uint2 spare;
+};
+
+[shader("fragment")]
+float4 fragmentTiles(VertexOut input) : SV_Target0
+{
+    uint64_t address = (uint64_t(input.flags >> 16) << 32) | uint64_t(input.texture);
+    uint* record = (uint*)address;
+    float2 p = input.uv;
+    int2 cell = clamp(int2(floor(p)), int2(0, 0), int2(31, 31));
+    uint value = record[4 + cell.y * 32 + cell.x];
+    if (value == 0)
+    {
+        discard;
+    }
+    // The table's offset is signed (tables come before their chunks): added in 64 bits,
+    // since a pointer plus a negative `int` wraps as an unsigned 32-bit offset.
+    int64_t table_offset = int64_t(int(record[0])) * 4;
+    TileEntry* table = (TileEntry*)(address + uint64_t(table_offset));
+    TileEntry tile = table[(value & 0xFFFFFu) - 1u];
+    if (tile.texture == NO_TEXTURE)
+    {
+        discard;
+    }
+    uint orientation = value >> 20;
+    float2 f = p - float2(cell);
+    float2 gx = ddx(p);
+    float2 gy = ddy(p);
+    if ((orientation & 4u) != 0)
+    {
+        f = f.yx;
+        gx = gx.yx;
+        gy = gy.yx;
+    }
+    if ((orientation & 1u) != 0)
+    {
+        f.x = 1.0 - f.x;
+    }
+    if ((orientation & 2u) != 0)
+    {
+        f.y = 1.0 - f.y;
+    }
+    float2 size = tile.uv.zw - tile.uv.xy;
+    // Up in the cell is up the image: v runs from the tile's bottom (max) to its top (min).
+    float2 uv = float2(tile.uv.x + f.x * size.x, tile.uv.w - f.y * size.y);
+    float4 color = input.color * g_textures[NonUniformResourceIndex(tile.texture)].SampleGrad(
+        g_samplers[NonUniformResourceIndex(tile.sampler)], uv, gx * size, gy * size);
+    return float4(color.rgb * (color.a * push.white), color.a);
 }
 
 // UI placed in the scene (ADR 0091): hidden where the scene drew something in front of it.

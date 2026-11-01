@@ -49,6 +49,25 @@ impl Order {
     }
 }
 
+/// Cells a tile chunk is wide and tall ([`Canvas::draw_tiles`]).
+pub const TILE_CHUNK: usize = 32;
+
+/// A tile of a tile set as tile-map chunks draw it (ADR 0125's E13-3b): its image and
+/// the region of it, as a sprite's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileEntry {
+    /// Bindless sampled-image index, or `None` while its image is not made (drawn clear).
+    pub texture: Option<u32>,
+    /// Sampler for the image.
+    pub sampler: SamplerKind,
+    /// Region: min u, min v, max u, max v; the tile's top at min v.
+    pub uv: [f32; 4],
+}
+
+/// A table of tiles recorded in a canvas ([`Canvas::tile_table`]), for its chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileTable(u32);
+
 /// An SDF outline for a quad: rounded corners, optionally hollow. Edges are antialiased.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Shape {
@@ -246,9 +265,23 @@ const _: () = assert!(core::mem::size_of::<Instance>() == 64);
 pub(crate) const NO_TEXTURE: u32 = u32::MAX;
 const FLAG_SDF: u32 = 0x8;
 const FLAG_ADDITIVE: u32 = 0x10;
+/// A tile chunk: `texture` is its record's byte offset in the canvas's tile data, made an
+/// address (low 32 bits there, high 16 in the flags' top) when the canvas is staged.
+pub(crate) const FLAG_TILES: u32 = 0x20;
 
-/// Pipeline selector in a batch's state: 0 premultiplied (alpha and additive), 1 multiply.
+/// Pipeline selector in a batch's state: 0 premultiplied (alpha and additive), 1 multiply,
+/// 2 tile chunks.
 pub(crate) const PIPELINE_MULTIPLY: u16 = 1;
+/// See [`PIPELINE_MULTIPLY`].
+pub(crate) const PIPELINE_TILES: u16 = 2;
+/// Bits of a batch's state that select its pipeline; the clip index is above them.
+const PIPELINE_BITS: u16 = 2;
+
+/// `u32`s of a tile table entry: uv (4 floats), texture, sampler, 2 spare.
+const TILE_ENTRY_WORDS: usize = 8;
+/// `u32`s of a chunk record before its cells: the table's offset from the record (in
+/// `u32`s, signed), 3 spare (16-byte alignment).
+const TILE_HEADER_WORDS: usize = 4;
 
 impl Instance {
     fn new(quad: &Quad) -> Self {
@@ -285,17 +318,18 @@ impl Instance {
 pub(crate) struct Batch {
     pub(crate) first: u32,
     pub(crate) count: u32,
-    /// Bit 0: pipeline ([`PIPELINE_MULTIPLY`]); the rest: clip index (0 = none).
+    /// Bits 0-1: pipeline ([`PIPELINE_MULTIPLY`], [`PIPELINE_TILES`]); the rest: clip
+    /// index (0 = none).
     pub(crate) state: u16,
 }
 
 impl Batch {
     pub(crate) fn pipeline(self) -> u16 {
-        self.state & 1
+        self.state & ((1 << PIPELINE_BITS) - 1)
     }
 
     pub(crate) fn clip(self) -> usize {
-        usize::from(self.state >> 1)
+        usize::from(self.state >> PIPELINE_BITS)
     }
 }
 
@@ -322,10 +356,12 @@ pub struct Canvas {
     batches: Vec<Batch>,
     stats: CanvasStats,
     prepared: bool,
+    /// Tile tables and chunk records ([`Self::draw_tiles`]), staged with the instances.
+    tile_data: Vec<u32>,
 }
 
 /// Largest number of distinct clip rectangles per canvas.
-pub const MAX_CLIPS: usize = (u16::MAX >> 1) as usize;
+pub const MAX_CLIPS: usize = (u16::MAX >> PIPELINE_BITS) as usize;
 
 impl Canvas {
     /// An empty canvas.
@@ -340,6 +376,7 @@ impl Canvas {
         self.clips.clear();
         self.current_state = 0;
         self.batches.clear();
+        self.tile_data.clear();
         self.prepared = false;
     }
 
@@ -357,7 +394,7 @@ impl Canvas {
                 }
             },
         };
-        self.current_state = (index as u16) << 1;
+        self.current_state = (index as u16) << PIPELINE_BITS;
         self.prepared = false;
     }
 
@@ -372,6 +409,61 @@ impl Canvas {
             index,
             state: self.current_state | pipeline,
         });
+    }
+
+    /// Records a table of tiles for the chunks drawn after it ([`Self::draw_tiles`]):
+    /// a chunk's cell value `k + 1` shows `entries[k]`.
+    pub fn tile_table(&mut self, entries: &[TileEntry]) -> TileTable {
+        let start = self.tile_data.len() as u32;
+        for e in entries {
+            self.tile_data.extend(e.uv.map(f32::to_bits));
+            self.tile_data.push(e.texture.unwrap_or(NO_TEXTURE));
+            self.tile_data.push(Bindless::sampler(e.sampler));
+            self.tile_data.extend([0, 0]);
+        }
+        debug_assert_eq!(self.tile_data.len() % 4, 0);
+        let _ = TILE_ENTRY_WORDS;
+        TileTable(start)
+    }
+
+    /// Adds a chunk of a flat tile layer (ADR 0125's E13-3b): one quad that `quad` places
+    /// (its transform, color and order) over [`TILE_CHUNK`]² cells, drawn by its own
+    /// fragment entry point. `cells` holds them row by row from the chunk's bottom (in a
+    /// y-up view), each 0 for empty or a tile of `table` plus one (20 bits) with its
+    /// orientation above (bit 20 flip x, 21 flip y, 22 transpose).
+    pub fn draw_tiles(
+        &mut self,
+        quad: &Quad,
+        table: TileTable,
+        cells: &[u32; TILE_CHUNK * TILE_CHUNK],
+    ) {
+        let record = self.tile_data.len() as u32;
+        let offset = table.0 as i64 - i64::from(record);
+        self.tile_data.extend([offset as i32 as u32, 0, 0, 0]);
+        self.tile_data.extend_from_slice(cells);
+        let _ = TILE_HEADER_WORDS;
+        let index = self.instances.len() as u32;
+        self.prepared = false;
+        let chunk = TILE_CHUNK as f32;
+        let mut instance = Instance::new(&Quad {
+            uv: [0.0, chunk, chunk, 0.0],
+            texture: None,
+            shape: None,
+            ..*quad
+        });
+        instance.texture = record * 4;
+        instance.flags = FLAG_TILES;
+        self.instances.push(instance);
+        self.entries.push(Entry {
+            key: quad.order.sort_key(),
+            index,
+            state: self.current_state | PIPELINE_TILES,
+        });
+    }
+
+    /// The tile tables and chunk records, as the GPU reads them.
+    pub(crate) fn tile_data(&self) -> &[u32] {
+        &self.tile_data
     }
 
     /// Number of quads.

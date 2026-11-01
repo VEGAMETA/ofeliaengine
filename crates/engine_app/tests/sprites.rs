@@ -877,3 +877,76 @@ fn an_aseprite_files_tag_plays_its_frames() {
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A tile map (ADR 0125's E13-3b) drawn from its tile set: each cell its tile's pixels,
+/// a flipped cell mirrored, cells in negative chunks where they belong, empty cells clear.
+#[test]
+fn a_tile_map_draws_its_cells_from_its_tile_set() {
+    use engine_app::TileMap;
+    use engine_scene::{TileSetFile, TileSource};
+    // 32 × 16: tile 0 red; tile 1 white on its left half, black on its right.
+    let sheet = image(32, 16, |x, _| match x {
+        0..16 => [255, 0, 0, 255],
+        16..24 => [255, 255, 255, 255],
+        _ => [0, 0, 0, 255],
+    });
+    let (dir, mut paths, ids) = project(
+        "tilemap",
+        &[(
+            "tiles.png",
+            sheet,
+            SpriteImport {
+                filter: engine_scene::SpriteFilter::Nearest,
+                ..SpriteImport::default()
+            },
+        )],
+    );
+    let mut set = TileSetFile::default();
+    set.sources.insert(
+        String::from("k0"),
+        TileSource {
+            image: AssetRef::file(ids[0]),
+            ..TileSource::default()
+        },
+    );
+    let set_id = AssetId::new();
+    std::fs::write(dir.join("art/forest.tileset"), set.to_text(set_id)).unwrap();
+    paths.insert(AssetRef::file(set_id), "art/forest.tileset");
+    let Some(mut player) = player(&dir, &paths) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let world = player.world_mut();
+    camera(world);
+    let mut map = TileMap::new(AssetRef::file(set_id));
+    map.set(0, 0, Some("k0:0,0"));
+    map.set(1, 0, Some("k0:1,0"));
+    map.set(2, 0, Some("k0:1,0 flip_x"));
+    map.set(-1, -1, Some("k0:0,0"));
+    world.spawn((Transform::IDENTITY, GlobalTransform::IDENTITY, map));
+    let mut game = Slides(None);
+    let red = [255, 0, 0, 255];
+    let mut rgba = Vec::new();
+    for _ in 0..600 {
+        player.frame(&mut game).unwrap();
+        rgba = player.capture(&mut game).unwrap().unwrap();
+        if at(&rgba, 0.5, 0.5) == red {
+            break;
+        }
+    }
+    let (white, black) = ([255, 255, 255, 255], [0, 0, 0, 255]);
+    assert_eq!(at(&rgba, 0.5, 0.5), red, "cell (0, 0)");
+    assert_eq!(at(&rgba, 1.25, 0.5), white, "cell (1, 0)'s left half");
+    assert_eq!(at(&rgba, 1.75, 0.5), black, "cell (1, 0)'s right half");
+    assert_eq!(at(&rgba, 2.25, 0.5), black, "flipped: its left half black");
+    assert_eq!(at(&rgba, 2.75, 0.5), white);
+    assert_eq!(
+        at(&rgba, -0.5, -0.5),
+        red,
+        "cell (-1, -1) in chunk (-1, -1)"
+    );
+    assert_ne!(at(&rgba, 0.5, 1.5), red, "an empty cell");
+    assert_ne!(at(&rgba, 0.5, -0.5), red, "an empty cell");
+    assert_valid(&player);
+    let _ = std::fs::remove_dir_all(&dir);
+}

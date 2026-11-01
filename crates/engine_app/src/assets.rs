@@ -893,6 +893,14 @@ pub struct Assets {
     /// Sprites' animation graphs (E13-2e): each animator's, cooked against its sprite's
     /// image's clips, with its state.
     sprite_graphs: HashMap<Entity, SpriteGraph>,
+    /// Tile sets read (E13-3b), `None` for one that could not be.
+    tile_sets: HashMap<AssetId, Option<TileSetState>>,
+}
+
+/// A tile set read (ADR 0125's E13-3b): its file and its sources' sprite image slots.
+pub(crate) struct TileSetState {
+    pub(crate) file: engine_scene::TileSetFile,
+    pub(crate) slots: std::collections::BTreeMap<String, u32>,
 }
 
 /// A sprite's animation graph (ADR 0125's E13-2e): cooked from graph file `file` against
@@ -1332,6 +1340,41 @@ impl Assets {
     /// [`Self::show_sprite_images`]): its slice of that number (the last for a number past
     /// them), or the whole image when it has none; `None` while its texture is being made,
     /// or when it cannot be.
+    /// Sprite image `slot` whole as this frame shows it (its texture's index and size),
+    /// once made: what tile sets cut their tiles from (E13-3b).
+    pub(crate) fn sprite_shown(&self, slot: u32) -> Option<SpriteImage> {
+        self.sprite_images.get(slot as usize)?.shown
+    }
+
+    /// Tile set `id` read the first time it is asked for (ADR 0125's E13-3b), its sources'
+    /// images made sprite image slots (loaded in the background); a file that cannot be
+    /// read is said once and never drawn.
+    pub(crate) fn ensure_tile_set(&mut self, id: AssetId) {
+        if self.tile_sets.contains_key(&id) {
+            return;
+        }
+        let path = self.paths.get(AssetRef::file(id)).map(str::to_owned);
+        let file = path.and_then(|path| {
+            engine_scene::TileSetFile::load(&self.root.join(&path))
+                .map_err(|e| log::warn!(target: "engine_app::assets", "tile set: {e}"))
+                .ok()
+        });
+        let state = file.map(|file| {
+            let slots = file
+                .sources
+                .iter()
+                .map(|(key, source)| (key.clone(), self.sprite_slot(source.image)))
+                .collect();
+            TileSetState { file, slots }
+        });
+        self.tile_sets.insert(id, state);
+    }
+
+    /// Tile set `id` as [`Self::ensure_tile_set`] read it, if it could.
+    pub(crate) fn tile_set(&self, id: AssetId) -> Option<&TileSetState> {
+        self.tile_sets.get(&id)?.as_ref()
+    }
+
     pub(crate) fn sprite_frame(&self, slot: u32, frame: u32) -> Option<SpriteImage> {
         let state = self.sprite_images.get(slot as usize)?;
         let image = state.shown?;
@@ -1794,6 +1837,7 @@ impl Assets {
             sprite_animators: None,
             sprite_work: Vec::new(),
             sprite_graphs: HashMap::new(),
+            tile_sets: HashMap::new(),
         }
     }
 

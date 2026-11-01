@@ -227,6 +227,167 @@ impl TileMap {
     }
 }
 
+/// Cells of a chunk as the GPU reads them ([`engine_render2d::Canvas::draw_tiles`]).
+type ChunkCells = [u32; (CHUNK * CHUNK) as usize];
+
+/// A tile map as drawn (ADR 0125's E13-3b): its tiles in a list (a cell holds its tile's
+/// place there plus one, and its orientation) and its chunks' cells.
+#[derive(Default)]
+struct Layer {
+    tiles: Vec<String>,
+    chunks: std::collections::HashMap<(i32, i32), Box<ChunkCells>>,
+}
+
+impl Layer {
+    /// `map`'s cells made again.
+    fn read(&mut self, map: &TileMap) {
+        self.tiles.clear();
+        self.chunks.clear();
+        let Self { tiles, chunks } = self;
+        map.for_each(|x, y, value| {
+            let (tile, orientation) = parse_cell(value);
+            let k = match tiles.iter().position(|t| t == tile) {
+                Some(k) => k,
+                None => {
+                    tiles.push(tile.to_owned());
+                    tiles.len() - 1
+                }
+            };
+            let ((cx, cy), column, row) = place(x, y);
+            let cells = chunks
+                .entry((cx, cy))
+                .or_insert_with(|| Box::new([0; (CHUNK * CHUNK) as usize]));
+            cells[row as usize * CHUNK as usize + column] =
+                (k as u32 + 1) | (u32::from(orientation) << 20);
+        });
+    }
+}
+
+type ChangedMaps =
+    engine_ecs::QueryState<(engine_ecs::Entity, &'static TileMap), engine_ecs::Changed<TileMap>>;
+type DrawnMaps = engine_ecs::QueryState<
+    (
+        engine_ecs::Entity,
+        &'static TileMap,
+        &'static engine_ecs::GlobalTransform,
+    ),
+    engine_ecs::Without<engine_runtime::Inactive>,
+>;
+
+/// The tile maps' runtime (ADR 0125's E13-3b): each map's cells read when it changes, and
+/// its visible chunks recorded into the 2D canvas, a quad a chunk.
+pub(crate) struct TileLayers {
+    changed: ChangedMaps,
+    drawn: DrawnMaps,
+    layers: std::collections::HashMap<engine_ecs::Entity, Layer>,
+    entries: Vec<engine_render2d::TileEntry>,
+}
+
+impl TileLayers {
+    pub(crate) fn new(world: &mut engine_ecs::World) -> Self {
+        Self {
+            changed: engine_ecs::QueryState::new(world),
+            drawn: engine_ecs::QueryState::new(world),
+            layers: std::collections::HashMap::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Records the visible chunks of every shown map into `canvas`, its place in the draw
+    /// order from `order` (layer, order, y); returns the chunks drawn. A map's cells are
+    /// read again when it changed; its tile set and their images are asked of `assets`.
+    pub(crate) fn record(
+        &mut self,
+        world: &engine_ecs::World,
+        assets: &mut crate::assets::Assets,
+        canvas: &mut engine_render2d::Canvas,
+        order: impl Fn(i16, i16, f32) -> engine_render2d::Order,
+        view: Option<crate::sprites::ViewRect>,
+    ) -> u32 {
+        engine_profiler::zone!("app::TileLayers::record");
+        let Self {
+            changed,
+            drawn,
+            layers,
+            entries,
+        } = self;
+        changed.for_each_readonly(world, |(e, map)| {
+            layers.entry(e).or_default().read(map);
+        });
+        let mut count = 0;
+        drawn.for_each_readonly(world, |(e, map, global)| {
+            if map.hidden || map.tile_set.is_none() {
+                return;
+            }
+            let Some(layer) = layers.get(&e) else {
+                return;
+            };
+            assets.ensure_tile_set(map.tile_set.file);
+            let Some(set) = assets.tile_set(map.tile_set.file) else {
+                return;
+            };
+            // Its tiles' images and regions this frame.
+            entries.clear();
+            entries.extend(layer.tiles.iter().map(|name| {
+                let clear = engine_render2d::TileEntry {
+                    texture: None,
+                    sampler: engine_rhi::SamplerKind::NearestClamp,
+                    uv: [0.0; 4],
+                };
+                let Some(tile) = engine_scene::TileName::parse(name) else {
+                    return clear;
+                };
+                let (Some(&slot), Some(rect)) =
+                    (set.slots.get(tile.source), set.file.tile_rect(tile))
+                else {
+                    return clear;
+                };
+                let Some(image) = assets.sprite_shown(slot) else {
+                    return clear;
+                };
+                let [x, y, w, h] = rect.map(|v: u32| v as f32);
+                let size = image.size.max(engine_core::math::Vec2::ONE);
+                engine_render2d::TileEntry {
+                    texture: Some(image.index),
+                    sampler: image.sampler,
+                    uv: [x / size.x, y / size.y, (x + w) / size.x, (y + h) / size.y],
+                }
+            }));
+            let table = canvas.tile_table(entries);
+            // A cell's size in metres, the map's scale applied (its rotation is not).
+            let m = global.0.matrix3;
+            let ppu = if set.file.pixels_per_unit > 0.0 {
+                set.file.pixels_per_unit
+            } else {
+                16.0
+            };
+            let cell = engine_core::math::Vec2::new(
+                set.file.tile[0] as f32 / ppu * m.x_axis.truncate().length(),
+                set.file.tile[1] as f32 / ppu * m.y_axis.truncate().length(),
+            );
+            let origin = global.0.translation.truncate();
+            let chunk = cell * CHUNK as f32;
+            let place = order(map.layer, map.order, origin.y);
+            let color = engine_core::math::Vec4::from_array(map.color);
+            for (&(cx, cy), cells) in &layer.chunks {
+                let min = origin + chunk * engine_core::math::Vec2::new(cx as f32, cy as f32);
+                let max = min + chunk;
+                if let Some(view) = view
+                    && (max.cmplt(view.min).any() || min.cmpgt(view.max).any())
+                {
+                    continue;
+                }
+                let quad = engine_render2d::Quad::rect((min + max) * 0.5, chunk)
+                    .color(color)
+                    .order(place);
+                canvas.draw_tiles(&quad, table, cells);
+                count += 1;
+            }
+        });
+        count
+    }
+}
+
 /// A cell's value read: its tile and orientation (bits: 1 flip x, 2 flip y, 4 transpose).
 pub fn parse_cell(value: &str) -> (&str, u8) {
     let mut words = value.split_ascii_whitespace();
