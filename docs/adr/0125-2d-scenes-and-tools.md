@@ -841,3 +841,27 @@ the 2D gizmo, images dropped as sprites) is E13-1b.
 - **Left (E13-2b and later):** the image's tab (grid, islands and hand slicing, names,
   pivots, borders, re-slicing that keeps names); clips in the `.meta` played by the
   `Animator`; Aseprite files; sliced and tiled modes.
+
+## As built (E13-2b, 2026-11-01): sprite clips played by the Animator
+
+- **`SpriteImport.clips`** (`SpriteClipImport`: `name`, `first`, `last` (backwards when
+  below), `frame_time` (0.1 s), per-frame `durations`, `mode` `Loop`/`Once`/`PingPong`,
+  `events` as a model clip's) as lines of the image's `.meta`. Laid out once per image
+  slot (`SpriteClip`: each frame's start, its frame number, the length; ping-pong's way
+  back without doubled ends), read again with the `.meta`.
+- **Played by the `Animator`** (question 6: a), nothing new on it: `Assets::animate_sprites`
+  runs in the tick after the animators move on and the `.anim` clips are written. An
+  animator on an entity with a `Sprite` whose clip is not one of its own `.anim` clips
+  (and not a graph) finds it among the image's clips by name (empty or unknown: the
+  first, as a model's), tells the animator the length and whether it holds (the next
+  tick wraps or holds there), sets `Sprite.frame` to the frame at the animator's time
+  only when it changes, and fires the events its tick passed through the `.anim` clips'
+  route (`AnimationEvents`, `on_animation_event`, event sounds). Frames change at ticks
+  (64 Hz), as a flipbook's should; speeds, pause, `play` and saves are the animator's.
+  Cross-fades cut (frames do not blend); graphs of sprite clips come later.
+- Tests: clip layout (forth, backwards, ping-pong, durations, held end); on both GPUs'
+  test a second of a two-frame clip played, the frame following the clip's time, the
+  length told and the time wrapping there.
+- **Left (E13-2c and later):** the image's tab (slicing by grid, islands and hand,
+  names, pivots, borders, re-slicing that keeps names; clips edited and previewed);
+  graphs whose states play sprite clips; Aseprite files; sliced and tiled modes.

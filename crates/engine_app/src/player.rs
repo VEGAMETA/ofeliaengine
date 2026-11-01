@@ -3571,6 +3571,7 @@ impl Player {
                         animators.advance(world, dt);
                         assets.borrow_mut().tick_graphs(world, dt);
                         assets.borrow_mut().animate_fields(world);
+                        assets.borrow_mut().animate_sprites(world);
                         assets.borrow_mut().move_roots(world);
                         assets.borrow_mut().fire_events(world);
                         assets.borrow_mut().place_sockets(world);

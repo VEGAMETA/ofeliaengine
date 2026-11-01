@@ -883,6 +883,9 @@ Last updated: 2026-10-28.
     contexts, the seekable decoder, legacy frames, zstd-sys) fixed by zstd 0.14.3,
     zstd-safe 8.2 and zstd-sys 2.1.2 in `engine_assets`, `engine_render` and `engine_save`;
     no code changed; cargo-deny green again.
+  - **E13-2b, sprite clips played by the Animator** (#PR): `sprite.clips` (frame runs,
+    times, loop/once/ping-pong, events) in an image's `.meta`; `Animator::new("run")` on
+    a sprite plays them, setting `Sprite.frame` each tick.
   - **E13-2a, slices** (#516): `sprite.slices` in an image's `.meta`; `Sprite.frame`
     numbers them (clamped), a part (`hero.png#run_1`) names one; drawn and picked at
     the slice's size and pivot.
